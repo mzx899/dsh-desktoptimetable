@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>桌面课表 1.3.1（第三代）</string>
+	<key>CFBundleExecutable</key>
+	<string>DesktopTimetable</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.desktoptimetable.app.v120</string>
+	<key>CFBundleName</key>
+	<string>DesktopTimetable</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.4.3</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.desktoptimetable.app.v120.settings</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>desktoptimetable</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>1.4.3</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>12.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>桌面课表读取你的日历，用来在课表里显示当天的日程。</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>桌面课表读取你的日历，用来在课表里显示当天的日程。</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>MIT License</string>
+	<key>NSLocationUsageDescription</key>
+	<string>桌面课表用你的位置查询当天的天气，显示在日期覆盖层里。位置只用于查询天气，不会被上传到其它服务。</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>桌面课表用你的位置查询当天的天气，显示在日期覆盖层里。位置只用于查询天气，不会被上传到其它服务。</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>桌面课表读取和修改你的提醒事项，用来在课表里显示并管理当天的待办。</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>桌面课表读取和修改你的提醒事项，用来在课表里显示并管理当天的待办。</string>
+</dict>
+</plist>

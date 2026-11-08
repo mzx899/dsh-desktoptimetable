@@ -1,0 +1,1755 @@
+/* 桌面课表卡片样式
+ * 直接取自旧版 Übersicht widget（index_next.jsx 的 className），
+ * 只做两处改动：
+ *   1) 原来嵌在容器规则里的样式展平成普通 CSS（Übersicht 会做嵌套处理，独立 HTML 不会）
+ *   2) 容器改为 .ttwrap，定位交给原生窗口，去掉 absolute/top/left
+ * 视觉请以这里为准，不要手改数值 —— 它就是旧版的像素规范。
+ *
+ * ── 维护约定：:hover 必须配一份 .tt-hover ──────────────────────────
+ * 桌面层窗口（level −1）收不到 mouseMoved，CSS 的 :hover 伪类永远不触发。
+ * 模式 B（网页直接上屏）靠原生侧的全局鼠标监控把指针位置同步进网页，
+ * 由 JS 给命中元素加 .tt-hover 类，再由下面的 .tt-hover 规则出悬停样式。
+ *
+ * 因此：**每新增一条 `:hover` 规则，必须同步写一条等价的 `.tt-hover` 规则**
+ *        （选择器一一对应，属性值保持一致）。
+ *
+ * 漏写的后果：模式 B 下该元素没有悬停效果，而快照模式下完全正常 ——
+ *             两种模式视觉不一致，而且很难在只跑快照模式时发现。
+ *
+ * 当前受影响的 6 个元素：.wkchip / .arrow / .nowbtn / .setbtn / .course / .close
+ * 新增可悬停元素时，同步更新上面这行清单。
+ */
+
+.ttwrap {
+  width: 968px;
+  position: relative;
+  font-family: -apple-system, "PingFang SC", "SF Pro Text", "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  color: #eef1f7;
+  /* 系统 WKWebView 目前不认无前缀的 user-select（CSS.supports 实测为 false），
+     只写下面那行等于没写，鼠标拖拽仍能框选整张课表。两行都保留。 */
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* 卡片深色底不在 .card 上画，而是画在 .ttwrap::before 并羽化。
+   .card 自己 overflow: hidden 会裁掉向外的羽化层，所以背景必须挂到
+   不被裁剪的父元素；父层没有 opacity 过渡，淡入淡出由原生窗口 alpha 负责，
+   两者天然同步。 */
+.ttwrap::before {
+  content: "";
+  position: absolute;
+  inset: -10px;
+  border-radius: 30px;
+  background: rgba(18, 20, 26, 0.66);
+  /* 更远的一层柔影，向外再铺开一段，让过渡有层次； */
+  box-shadow: 0 0 48px 12px rgba(18, 20, 26, 0.30);
+  /* 32px 羽化：边缘的深色底在 ~45px 内渐隐进壁纸，不出现硬切线。
+     最大外扩 10 + 12 + 48 ≈ 70pt，留在窗口四周 90pt 边距以内。 */
+  filter: blur(32px);
+  z-index: -1;
+  pointer-events: none;
+}
+
+.card {
+  box-sizing: border-box;
+  width: 968px;
+  padding: 16px 18px 18px;
+  border-radius: 20px;
+  background: transparent;
+  -webkit-backdrop-filter: blur(30px) saturate(165%);
+  backdrop-filter: blur(30px) saturate(165%);
+  position: relative;
+  overflow: hidden;
+
+  /* 最终透明度 + 变虚秒数（移出鼠标时使用） */
+  opacity: var(--tt-min-opacity, 0.22);
+  transition: opacity var(--tt-fade-out, 6s) cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* 由 JS 几何判定加上 .solid 类。
+   不能用 :hover —— Übersicht 的 overlay webview 里，
+   带 backdrop-filter 的元素 :hover 命中测试失效。
+
+   变实时用变实秒数：transition-duration 取「变化后」的计算样式，
+   所以加 .solid 时生效 --tt-fade-in，去掉时回落到 --tt-fade-out。 */
+.card.solid {
+  opacity: var(--tt-max-opacity, 1);
+  transition-duration: var(--tt-fade-in, 0.8s);
+}
+
+.top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 2px 2px 13px;
+  /* 图钉是原生控件（见 PushPinButton.swift），叠在标题右侧的空白处，
+     不占顶栏排版空间 —— 标题保持原来的左边距。 */
+}
+
+.ttl { font-size: 15px; font-weight: 600; letter-spacing: 0.2px; }
+.sub { font-size: 10.5px; color: rgba(238, 241, 247, 0.44); margin-top: 4px; letter-spacing: 0.2px; }
+
+/* 标题块固定宽度。
+   .top 是 space-between，三个子项时中间项位置受左侧块宽度支配：
+     周次组左边缘 = 标题块宽 + 剩余空白 / 2
+   所以标题文案一变，周次组就横移 —— 从「马梓轩 · 本周课表」+ 副标题换成短标题
+   之后，周次组实测左移 75pt。这里把宽度钉死，位置就只由版式决定，不再随文案漂。
+   宽度值是为了精确复刻旧版 1.0.0 的周次组位置（x=727）测出来的。
+   文字超长时省略，不能让它撑破块宽、把周次组挤走。 */
+.brand { flex: 0 0 210px; width: 210px; min-width: 0; overflow: hidden; }
+/* 标题行 = 文字 + 图钉（2026-11）：图钉和标题在同一个 flex 行里，
+   跟着同一套 transform 缩放，不会和文字「各走各的」。 */
+.brand .ttl { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.brand .ttltxt { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 图钉：**只定高、宽度按原始比例**（2026-11 修「比原来宽」）。
+   原生的画法是「17pt 高、按比例缩放到 17pt 的框里」（SF Symbol 画布 21×23，
+   实际约 15.5×17），网页这边如果写死 width/height 会把图标横向拉宽。 */
+.brand .ttlpin {
+  height: 17px; width: auto; flex: 0 0 auto;
+  opacity: .96; -webkit-user-drag: none; cursor: pointer;
+  filter: drop-shadow(0 0 1.5px rgba(0, 0, 0, .55));
+}
+.brand .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.wkgroup { display: flex; align-items: center; gap: 8px; }
+
+/* 周次区宽度固定：切到「全部周次」时 chip 文字变长，
+   若不固定宽度，居中排版会把 chip 和左右箭头整体挤动。 */
+.wkstack {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  width: 132px; flex: 0 0 auto;
+}
+.wkdate {
+  font-size: 9.5px; color: rgba(238, 241, 247, 0.40);
+  letter-spacing: 0.2px; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  width: 100%; text-align: center;
+}
+
+.wkchip {
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(238, 241, 247, 0.84);
+  padding: 5px 0;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  white-space: nowrap;
+  box-sizing: border-box;
+  width: 68px;
+  text-align: center;
+  cursor: pointer;
+  transition: background 200ms, border-color 200ms, color 200ms;
+}
+.wkchip:hover { background: rgba(255, 255, 255, 0.13); }
+/* 实验模式 B（DT_LIVE=1）：非 key 窗口收不到 mouseMoved，
+   网页的 :hover 伪类不会自己触发。原生把指针位置同步进来，
+   JS 给命中元素加 .tt-hover 类，这里补上与 :hover 等价的规则。
+   快照模式（方案 A）下永远不会有 .tt-hover，不影响任何行为。 */
+.wkchip.tt-hover { background: rgba(255, 255, 255, 0.13); }
+.wkchip.now { color: #fff; border-color: rgba(79, 140, 255, 0.42); background: rgba(79, 140, 255, 0.14); }
+
+.arrow {
+  width: 24px; height: 24px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 7px;
+  font-size: 9px;
+  color: rgba(238, 241, 247, 0.62);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+  transition: background 200ms, color 200ms, border-color 200ms;
+  flex: 0 0 auto;
+}
+.arrow:hover {
+  background: rgba(79, 140, 255, 0.18);
+  border-color: rgba(79, 140, 255, 0.38);
+  color: #fff;
+}
+.arrow.tt-hover {
+  background: rgba(79, 140, 255, 0.18);
+  border-color: rgba(79, 140, 255, 0.38);
+  color: #fff;
+}
+.arrow:active { transform: scale(0.92); }
+.arrow.dis { opacity: 0.28; cursor: default; }
+
+.nowbtn.ghost { visibility: hidden; pointer-events: none; }
+.nowbtn {
+  font-size: 10px;
+  font-weight: 500;
+  color: #4f8cff;
+  padding: 4px 9px;
+  border-radius: 8px;
+  background: rgba(79, 140, 255, 0.12);
+  border: 1px solid rgba(79, 140, 255, 0.30);
+  cursor: pointer;
+  transition: background 200ms;
+  white-space: nowrap;
+}
+.nowbtn:hover { background: rgba(79, 140, 255, 0.22); }
+.nowbtn.tt-hover { background: rgba(79, 140, 255, 0.22); }
+
+.clock { display: flex; align-items: center; gap: 12px; }
+.tnum { font-size: 19px; font-weight: 300; letter-spacing: 0.5px; font-variant-numeric: tabular-nums; text-align: right; }
+.tdate { font-size: 10.5px; color: rgba(238, 241, 247, 0.44); margin-top: 2px; white-space: nowrap; }
+
+.setbtn {
+  width: 27px; height: 27px;
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  color: rgba(238, 241, 247, 0.60);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+  transition: background 200ms, color 200ms, border-color 200ms;
+  flex: 0 0 auto;
+}
+.setbtn:hover {
+  background: rgba(79, 140, 255, 0.18);
+  border-color: rgba(79, 140, 255, 0.38);
+  color: #fff;
+}
+.setbtn.tt-hover {
+  background: rgba(79, 140, 255, 0.18);
+  border-color: rgba(79, 140, 255, 0.38);
+  color: #fff;
+}
+.setbtn:active { transform: scale(0.92); }
+.setbtn svg { display: block; }
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 12px;
+  margin-bottom: 11px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+.status.live {
+  background: linear-gradient(90deg, rgba(79, 140, 255, 0.20), rgba(165, 119, 255, 0.10));
+  border-color: rgba(79, 140, 255, 0.36);
+}
+
+/* 呼吸圈：动画只改 transform / opacity，交给合成器（GPU）跑。
+ *
+ * ⚠️ 以前是 `box-shadow` 从 0 撑到 7px 的无限动画 —— 那会让 WebKit
+ * **每一帧**都重绘整张卡片、重新提交 layer tree（实测空转时
+ * WebContent ~10% + 主进程 ~5% CPU，主进程全花在收 layer tree 上）。
+ * 现在拆成两层：
+ *   · `.pulse::before` 是圆盘（21×21），从贴着圆点的 1/3 放大到 1 倍，
+ *     同时透明度 1 → 0；圆点盖住它的中心，露出来的就是和原来一样的圆环。
+ *   · `.pulse::after` 是圆点本身，盖在圆盘上面。
+ * transform / opacity 由合成器插值，不再逐帧重绘页面。
+ */
+.pulse {
+  width: 7px; height: 7px;
+  position: relative;
+  flex: 0 0 auto;
+}
+.pulse::before,
+.pulse::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+}
+.pulse::before {
+  left: -7px; top: -7px; width: 21px; height: 21px;
+  background: rgba(52, 211, 153, 0.55);
+  transform: scale(0.3333);
+  animation: pl 2.4s ease-out infinite;
+  will-change: transform, opacity;
+}
+.pulse::after {
+  left: 0; top: 0; width: 7px; height: 7px;
+  background: #34d399;
+}
+.pulse.idle::before {
+  background: rgba(238, 241, 247, 0.05);
+  animation: pl-idle 2.4s ease-out infinite;
+}
+.pulse.idle::after { background: rgba(238, 241, 247, 0.26); }
+
+@keyframes pl-idle {
+  0%   { transform: scale(0.3333); opacity: 1; }
+  70%  { transform: scale(1); opacity: 0.2; }
+  100% { transform: scale(1); opacity: 0.2; }
+}
+
+@keyframes pl {
+  0%   { transform: scale(0.3333); opacity: 1; }
+  70%  { transform: scale(1); opacity: 0; }
+  100% { transform: scale(1); opacity: 0; }
+}
+
+.stxt { font-size: 12px; font-weight: 600; letter-spacing: 0.2px; white-space: nowrap; }
+.smeta { font-size: 10.5px; color: rgba(238, 241, 247, 0.50); margin-left: auto; letter-spacing: 0.2px; white-space: nowrap; }
+
+.grid {
+  display: grid;
+  grid-template-columns: 58px repeat(7, 1fr);
+  grid-template-rows: 38px repeat(10, 54px);
+  gap: 6px;
+  /* 覆盖层（.daypanel）以网格为定位原点：表头格底边 + 列 x/宽 */
+  position: relative;
+}
+
+/* 表头：中间段竖排两行（周几 / 几号），红点 / 蓝点分居「周几」两侧。 */
+.hcell {
+  position: relative;
+  display: flex; flex-direction: row; align-items: center; justify-content: center; gap: 0px;
+  font-size: 10.5px; font-weight: 500;
+  color: rgba(238, 241, 247, 0.42);
+  letter-spacing: 0.6px;
+}
+/* ⚠️ **红点 / 橙点不再绝对定位**（2026-11 改）。
+ *
+ * 以前它们是绝对定位在**格子最左缘**的（一个叫 `.hslot` 的绝对定位容器，
+ * `left: 0`），而蓝点（今天）在「周几」二字**右边** ——
+ * 两者**不在同一水平线**上，离中轴的距离也差 50pt 以上，看着不对称。
+ *
+ * 现在红点直接放进 `.hdrow` 里（「🔴 周一 🔵」）：
+ *   · **和蓝点同一水平线**；
+ *   · **分居「周几」文字两侧** —— 真正对称。
+ *
+ * 橙点（有日程）仍在红点**下方** —— 它是第二个标记，
+ * 表头格只有 38pt 高，竖着排才放得下。
+ *
+ * ⚠️ `.hslot` 那套绝对定位的容器**已经整个删掉**（连 div 都不再渲染）——
+ * 留着它的话，点还是飘在格子最左缘，和蓝点对不上。 */
+
+/* 红点 / 橙点的颜色（位置改由布局决定，不再绝对定位）。 */
+.dot.todo { background: #ef5f5b; }   /* 红点：有待办 */
+.dot.event { background: #f5a524; }  /* 橙点：有日程 */
+/* 没有待办 / 日程时**只隐藏、不摘节点** —— 节点摘掉/插回来会让
+ * 「周一」两个字左右跳一下（用户看到的「表头闪一下」）。
+ * visibility:hidden 保留占位，文字位置永远不动。 */
+.dot.off { visibility: hidden; }
+
+.hmid {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+}
+/* 🔴 周一 🔵 —— 左右两个点**对称**占位。
+ *
+ * 原来 `gap: 4px` 再给红点 `margin-right: -1px`（4px 有点挤，3px 刚好），
+ * 但蓝点那边是 4px —— 左右差 1px，「周几」会被推偏半个像素。
+ * 现在一律 gap: 3px，两边完全对称，文字的横向中心就是格子的中心，
+ * 和下面 `.hnum` 的号数共用同一条竖中线。 */
+.hdrow { display: flex; align-items: center; gap: 3px; }
+.hnum {
+  font-size: 12px; font-weight: 600;
+  color: rgba(238, 241, 247, 0.62);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.3px;
+}
+.hcell.today { color: #fff; }
+.hcell.today .hnum { color: #4f8cff; }
+
+/* 表头可点击：纯变色提示（不加下划线、不加常驻图标）。 */
+.hcell.pick {
+  cursor: pointer;
+  border-radius: 9px;
+  transition: background 200ms ease, color 200ms ease;
+}
+.hcell.pick:hover { background: rgba(255, 255, 255, 0.07); color: rgba(238, 241, 247, 0.92); }
+.hcell.pick.tt-hover { background: rgba(255, 255, 255, 0.07); color: rgba(238, 241, 247, 0.92); }
+.hcell.pick:hover .hnum { color: rgba(238, 241, 247, 0.92); }
+.hcell.pick.tt-hover .hnum { color: rgba(238, 241, 247, 0.92); }
+.hcell.pick.today:hover .hnum,
+.hcell.pick.today.tt-hover .hnum { color: #7aa8ff; }
+/* 被查看的那一列（覆盖层正在显示）→ 选中态高亮。
+ *
+ * ⚠️ **蓝色渐变 + 外发光 + 顶部亮线**（2026-11 加固）——
+ * 参考图里选中的「周四 5」就是一张蓝色渐变 + 外发光的卡片。
+ *
+ * ⚠️ **但不要把它从表头行里拆出来** ——
+ * 表头格是 CSS Grid 的一格，拆出来（position:absolute）会让网格对齐崩掉。
+ * 所以这里只在**原来的格子位置**上加渐变底 + 发光，
+ * 网格布局完全不受影响。
+ */
+.hcell.pick.sel {
+  background: linear-gradient(160deg, rgba(79, 140, 255, 0.42), rgba(99, 102, 241, 0.28));
+  box-shadow:
+    inset 0 1.5px 0 rgba(150, 190, 255, 0.95),
+    0 0 14px rgba(79, 140, 255, 0.45),
+    0 0 30px rgba(79, 140, 255, 0.22);
+  color: #fff;
+}
+.hcell.pick.sel .hnum { color: #fff; }
+.hcell.pick.sel.today .hnum { color: #fff; }
+/* 悬停规则要压过下面的 .sel（选中态）——
+   规格要求「被查看的那一列表头要有选中态高亮」，
+   但悬停时也必须有反馈，否则选中态那一列 hover 起来像没反应。 */
+.hcell.pick.sel:hover,
+.hcell.pick.sel.tt-hover {
+  background: linear-gradient(160deg, rgba(99, 156, 255, 0.55), rgba(99, 102, 241, 0.38));
+  box-shadow:
+    inset 0 1.5px 0 rgba(180, 210, 255, 1),
+    0 0 18px rgba(79, 140, 255, 0.6),
+    0 0 36px rgba(79, 140, 255, 0.3);
+}
+.hcell.pick.sel:hover .hnum,
+.hcell.pick.sel.tt-hover .hnum { color: #fff; }
+
+/* 左上角：月份（如 10 / 月，参考图里上下叠放） */
+.hcorner {
+  flex-direction: column; align-items: center; justify-content: center;
+  gap: 0px; padding-left: 0px;
+}
+.mon { font-size: 15px; font-weight: 600; color: rgba(238, 241, 247, 0.74); line-height: 1.05; }
+.monu { font-size: 9.5px; color: rgba(238, 241, 247, 0.40); letter-spacing: 0.2px; line-height: 1.1; }
+.dot { width: 4px; height: 4px; border-radius: 50%; background: #4f8cff; }
+
+.tcell {
+  display: flex; flex-direction: column; justify-content: center; align-items: flex-end;
+  padding-right: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.tn { font-size: 10px; color: rgba(238, 241, 247, 0.55); letter-spacing: 0.3px; margin-bottom: 1px; font-weight: 600; }
+.ts { font-size: 10px; color: rgba(238, 241, 247, 0.66); font-weight: 500; line-height: 1.15; }
+.te { font-size: 8.5px; color: rgba(238, 241, 247, 0.26); line-height: 1.15; margin-top: 1px; }
+
+.cell { border-radius: 10px; box-sizing: border-box; overflow: hidden; }
+
+.empty {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px dashed rgba(255, 255, 255, 0.045);
+}
+
+.course {
+  position: relative;
+  display: flex; flex-direction: column; justify-content: center;
+  padding: 7px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+  transition: box-shadow 600ms cubic-bezier(0.4, 0, 0.2, 1), filter 600ms cubic-bezier(0.4, 0, 0.2, 1), border-color 600ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.course:hover {
+  filter: brightness(1.18);
+  border-color: rgba(255, 255, 255, 0.32) !important;
+}
+.course.tt-hover {
+  filter: brightness(1.18);
+  border-color: rgba(255, 255, 255, 0.32) !important;
+}
+/* 非本周的格子（同一门课在别的周次才上）。
+ *
+ * 1) **不能用整格 opacity**：那会把字形一起压薄，看着像换了字体。
+ *    改成只调各元素的颜色 —— 字重、字形、行距和本周的格子一模一样，
+ *    只是颜色淡。没有透明度，就没有「重影」「发虚」那种像换字体的感觉。
+ * 2) 「非本周」原来是一行**参与布局**的文字。`.course` 是
+ *    `justify-content: center` 的弹性列，多出来的一行会把上面三行
+ *    （课名/地点/周次）整体顶高 6.5px —— 同一门课在亮格和暗格里
+ *    就差半个行高，对不齐。现在改成绝对定位（右下角空白处），
+ *    两种状态的内容高度完全一样，上下对齐。
+ */
+.course.off { opacity: 1; }
+.course.off .ntxt { color: rgba(238, 241, 247, 0.40); }
+.course.off .cloc { color: rgba(238, 241, 247, 0.18); }
+.course.off .cwk { color: rgba(238, 241, 247, 0.12); }
+.course.off .bar { opacity: 0.32; }
+.course.off .cconf { color: rgba(245, 165, 36, 0.35); }
+
+.cname {
+  font-size: 11px; font-weight: 600; line-height: 1.24;
+  display: flex; align-items: flex-start; gap: 5px;
+}
+.bar { flex: 0 0 auto; width: 2px; height: 10px; margin-top: 2px; border-radius: 2px; opacity: 0.9; }
+.ntxt {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-all;
+  /* 课名统一占 **两行**的高度：一行的课名也把第二行的位置留出来。
+   * 这样每个格子的文字块高度完全一样 —— 垂直居中之后，
+   * 所有格子的课名/地点/周次都落在同一条基线上，整张网格是齐的。
+   * （课名两行的格子比一行的格子首行高 6.8px，就是这里没留位造成的。） */
+  min-height: 2.48em;
+}
+
+.cloc {
+  font-size: 9px; line-height: 1.3;
+  color: rgba(238, 241, 247, 0.46);
+  margin-top: 4px; padding-left: 7px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cwk {
+  font-size: 8.5px; line-height: 1.3;
+  color: rgba(238, 241, 247, 0.28);
+  margin-top: 2px; padding-left: 7px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 「非本周」角标：绝对定位在右下角，不参与布局 */
+.cnot {
+  position: absolute;
+  right: 7px;
+  bottom: 6px;
+  font-size: 8.5px;
+  line-height: 1;
+  color: rgba(238, 241, 247, 0.30);
+  white-space: nowrap;
+  pointer-events: none;
+}
+/* 冲突标记：同一格有多门课 */
+.cconf {
+  position: absolute; top: 3px; right: 4px;
+  font-size: 10px; line-height: 1;
+  color: rgba(245, 165, 36, 0.95);
+  pointer-events: none;
+}
+
+/* 临时覆盖标记：这一格是某几周的临时覆盖 */
+.covr {
+  position: absolute; top: 3px; right: 4px;
+  font-size: 10px; line-height: 1;
+  color: rgba(120, 190, 255, 0.95);
+  pointer-events: none;
+}
+
+/* ---- 详情弹层 ---- */
+.ovl {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(8, 9, 13, 0.62);
+  -webkit-backdrop-filter: blur(14px) saturate(120%);
+  backdrop-filter: blur(14px) saturate(120%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 20;
+  animation: fadeIn 0.16s ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.sheet {
+  width: 430px;
+  box-sizing: border-box;
+  padding: 20px 22px 18px;
+  border-radius: 18px;
+  background: rgba(30, 33, 42, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 26px 70px rgba(0, 0, 0, 0.6);
+  animation: pop 0.18s cubic-bezier(0.2, 0.9, 0.3, 1.1);
+}
+
+@keyframes pop {
+  from { opacity: 0; transform: scale(0.95) translateY(6px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.sheet-top { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 16px; }
+.sheet-dot { width: 9px; height: 9px; border-radius: 50%; margin-top: 6px; flex: 0 0 auto; }
+.sheet-name { font-size: 17px; font-weight: 600; line-height: 1.3; letter-spacing: 0.2px; }
+.sheet-code { font-size: 10.5px; color: rgba(238, 241, 247, 0.38); margin-top: 4px; letter-spacing: 0.3px; font-variant-numeric: tabular-nums; }
+
+.close {
+  margin-left: auto;
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(238, 241, 247, 0.75);
+  font-size: 13px; line-height: 1;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.close:hover { background: rgba(255, 255, 255, 0.18); color: #fff; }
+.close.tt-hover { background: rgba(255, 255, 255, 0.18); color: #fff; }
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  margin-bottom: 8px;
+}
+.row:last-child { margin-bottom: 0; }
+.k { font-size: 11px; color: rgba(238, 241, 247, 0.42); letter-spacing: 0.3px; flex: 0 0 auto; }
+.v { font-size: 12px; font-weight: 500; text-align: right; line-height: 1.45; }
+/* =====================================================================
+ * 日期覆盖层（点表头日期 → 在那一列上盖一个面板）
+ *
+ * 结构（JS 生成）：
+ *   .daypanel            覆盖层容器，挂在 .grid 上（position: relative）
+ *     .dpbody            压暗磨砂**底板**（高度自适应 = 内容高度）
+ *       .dpcards         卡片容器（纵向 flex，gap 9px）
+ *         .dpcard        一张卡片（.todo / .event / .detail / .empty / .ghost）
+ *           .dpcardhd    标签行（图标 + 类别名）
+ *           .dpcardbody  正文（标题 + 次要信息）
+ *             .dpmain     圈 + 标题（同一行）
+ *     .dpfade            渐变区（实心区底部往下一直渐变到底）
+ *
+ * 几何：
+ *   · 顶边贴着表头格底边（top 由 JS 按表头行底部算）
+ *   · 窄态宽度 = 单列宽；宽态宽度由 JS 按内容算
+ *   · 出现：**clip-path 自上而下揭开**（600ms），不用 scaleY（会把文字压扁）
+ *   · 收起：clip-path 反向收拢（400ms），`.closing` 自成一体
+ *   · 尾部渐变：.dpbody 实心（高度自适应） + .dpfade 一直渐变到底
+ *   · 宽态左右两边用 mask 渐隐（内容本身一起淡出）
+ *   · 内容装不下 → **面板内滚动**（窄态宽态都是），不截断条目
+ * ===================================================================== */
+
+.daypanel {
+  position: absolute;
+  z-index: 12;
+  pointer-events: none;      /* 面板本体不吃事件（鼠标要能落到下面的课表格） */
+  opacity: 0;
+  visibility: hidden;
+  /* ⚠️ `visibility` 的切换**必须延迟**到淡出结束 ——
+   *
+   * `visibility` 默认是「立刻切换」的（不是可过渡属性），
+   * 以前摘掉 `.show` 的瞬间面板就 `visibility:hidden` 了，
+   * **淡出动画根本看不见** —— 表现为「面板唰一下就没了」。
+   *
+   * 现在：
+   *   · 打开时 visibility 立刻变 visible（`0s` 延迟）；
+   *   · 收起时 visibility 延迟 400ms（= 淡出时长）再切 hidden。
+   */
+  transition: opacity 400ms ease, visibility 0s linear 400ms,
+              clip-path 400ms cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: opacity, clip-path;
+  /* ⚠️ 裁剪的是**整个面板**（实心区 + 渐变尾巴），不是只裁实心区。
+   *
+   * 只裁 `.dpbody` 时，下面那条很高的玻璃尾巴会在打开瞬间**整块出现**
+   * （它只是跟着容器 400ms 淡入），看上去就是「唰一下」——
+   * 用户反馈的「瀑布还是这么快」主要来自这里。
+   *
+   * 现在整条瀑布从表头底边往下一起揭开：尾巴和实心区同时被裁，
+   * 600ms 内一层层铺到底，才像水往下淌。
+   */
+  -webkit-clip-path: inset(0 0 100% 0);
+  clip-path: inset(0 0 100% 0);
+}
+.daypanel.show {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  /* 打开时 visibility **立刻**生效（不要延迟）；
+     揭开用 600ms，收拢回落到基础规则的 400ms。 */
+  transition: opacity 400ms ease, visibility 0s linear 0s,
+              clip-path 600ms cubic-bezier(0.2, 0.85, 0.3, 1);
+  -webkit-clip-path: inset(0);
+  clip-path: inset(0);
+}
+/* ⚠️ **不用 scaleY 变换**。
+ *
+ * `scaleY(0.02) -> scaleY(1)` 会把文字**一起压扁**，
+ * 缓动到一半时字是横着压的 —— 600ms 下非常明显、观感差。
+ *
+ * 改成 **clip-path 自上而下揭开**（裁剪做在 `.daypanel` 上，
+ * 实心区和尾巴一起揭开）：内容始终是正常比例，
+ * 只是被一个「自上而下推进的裁剪窗口」逐步露出来。
+ *   · 关闭态：`inset(0 0 100% 0)`（完全裁掉）
+ *   · 打开态：`inset(0)`（全露）
+ *
+ * CSS 过渡用的是**变化之后**的 transition 值 ——
+ * 所以「开」用 600ms、「关」用 400ms 可以分开写。
+ */
+/* ⚠️ **重新挂载时关掉过渡** ——
+ *
+ * 覆盖层元素跨 render() 复用（见 Timetable.js 的 buildPanel）。
+ * 元素被摘下来再挂回新 grid 的那一帧，如果 transition 还开着，
+ * 浏览器会把它当成「从旧值过渡到新值」→ 入场动画重播 → 面板闪一下。
+ *
+ * `.dpnoreplay` 用 `transition: none !important` 把这一帧的过渡彻底关掉。
+ */
+.daypanel.dpnoreplay,
+.daypanel.dpnoreplay * {
+  transition: none !important;
+  animation: none !important;
+}
+
+/* ⚠️ **淡出（`.fading`）已删除**（2026-11 统一）。
+ *
+ * 以前「鼠标离开」走 `.fading` 透明度淡出、「点击关闭」走 `.closing`
+ * 收拢 —— 两套并存会互相抢状态：淡出播到一半被 openPanel 摘掉 `.fading`
+ * → opacity 回弹（表现为「收到一半又突然长回去」）。
+ *
+ * 现在消失动画**只有 `.closing` 一种**（淡出 + 自下而上收拢），
+ * 鼠标离开（fadeOutPanel）和点击关闭（closePanel）共用。
+ * `.show` 的 opacity:1 由上面的 `.daypanel.show` 保证。 */
+
+/* 点击关闭的收起动画：自下而上收拢（clip-path 从上往下收）。
+ *
+ * ⚠️ `.closing` 是**自成一体的状态** —— 它不依赖 `.show`。
+ *
+ * 以前收拢期间是「带着 show 的」，于是：
+ *   · `show` 摘掉之前先摘 → 元素立刻 `visibility:hidden`，动画看不见；
+ *   · 摘到最后才摘 → 期间元素上还留着 `show` 类，
+ *     自检断言「关掉之后不能还留着 show 类」直接失败。
+ *
+ * 现在 `.closing` 自己负责可见性：
+ *   · 收拢期间 `visibility:visible` + `opacity:1`（只是被 clip-path 裁掉）；
+ *   · `visibility` 的切换延迟 400ms，动画播完才 hidden。
+ */
+.daypanel.closing {
+  /* ⚠️ **opacity 也要一起淡出**（2026-11 修）。
+   *
+   * 以前这里是 `opacity: 1` —— 收起动画**只有** clip-path 一条曲线。
+   * 而淡出（`.fading`）是 clip-path + opacity 两条曲线，
+   * 所以用户看到「鼠标移上去有动画、点关闭没动画」。
+   *
+   * 实际上 clip-path 在**窄条**（119pt）上裁切表现为「内容从下往上被吃掉」，
+   * 底板本身又是半透明的 → 肉眼看不出「在动」，只觉得「唰一下没了」。
+   *
+   * 加上 opacity 之后，收起和淡出的观感一致（淡出 + 收拢），
+   * 用户能明确看出「它在收」。
+   *
+   * ⚠️ 动画**结束**时（400ms 后）元素会被摘掉，
+   * 所以「淡到 0 之后停在那儿」不会有残留问题。
+   */
+  opacity: 0;
+  visibility: visible;
+  pointer-events: none;
+  /* 收起：整条瀑布（实心区 + 尾巴）一起自下而上收拢 + 淡出，400ms。 */
+  transition: opacity 400ms ease, visibility 0s linear 400ms,
+              clip-path 400ms cubic-bezier(0.4, 0, 0.2, 1);
+  -webkit-clip-path: inset(0 0 100% 0);
+  clip-path: inset(0 0 100% 0);
+}
+/* ⚠️ **兜底：动画没跑的时候，面板也要看得见**（2026-11）。
+ *
+ * 合成器不跑的时候（窗口不可见 / 离屏渲染 / 快照模式），
+ * CSS transition 会永远停在起始帧 —— 而起始帧是 `inset(0 0 100% 0)`
+ * （完全裁掉）→ **面板整个看不见**。
+ *
+ * 这个类 = 「不裁了，直接全露」。
+ *
+ * ⚠️ **必须放在 `.closing` 之后** ——
+ * 优先级和 `.show` / `.closing` 一样（都是单类选择器），
+ * **样式表里靠后的赢**：
+ *   · 兜底时 → `.dpnoplay` 生效 → 面板看得见；
+ *   · 收起时 → 网页会摘掉这个类 → `.closing` 的收起动画正常播。
+ *
+ * ⚠️ **绝不能改成 inline style**（`style.clipPath = 'none'`）——
+ * inline 的优先级比任何 class 都高，会**永久**压住 `.closing`
+ * 的收起动画（用户反馈「再点一次关闭覆盖层的时候没有消失的动画」）。
+ */
+.daypanel.dpnoplay {
+  /* ⚠️ **必须是 `inset(0)`，不能是 `none`**（2026-11 修）。
+   *
+   * 浏览器**不能**在 `none` ↔ `inset(...)` 之间做插值 ——
+   * 一端是 `none` 的话，过渡会**直接跳到终值**，不播动画。
+   *
+   * 以前这里写的是 `none`：兜底触发之后，面板就一直是 `none`，
+   * 于是关闭时的收起动画（`inset(0 0 100% 0)`）**一步跳完** ——
+   * 用户反馈「再点一次关闭覆盖层的时候没有消失的动画」。
+   *
+   * `inset(0)` 和 `inset(0 0 100% 0)` 是**同一种形状**，可以插值 → 动画正常。
+   */
+  -webkit-clip-path: inset(0);
+  clip-path: inset(0);
+}
+
+/* 尾巴跟着一起淡出 */
+.daypanel .dpfade {
+  opacity: 1;
+  transition: opacity 400ms ease;
+}
+.daypanel.show .dpfade {
+  opacity: 1;
+  transition: opacity 600ms ease 120ms;
+}
+.daypanel.closing .dpfade { opacity: 0; }
+
+/* 实心区（**压暗磨砂底板**）：高度自适应（内容多高就多高） */
+.dpbody {
+  position: relative;
+  /* ⚠️ 必须在尾巴**上面**（z-index 更高）。
+   *
+   * 实心区和尾巴各自带 backdrop-filter，边界上会各留一圈
+   * 「毛玻璃亮边」。谁压着谁，就只看得见**上面那个**的边 ——
+   * 尾巴在下、实心区在上，实心区把尾巴的顶边盖住，
+   * 交界处就只剩实心区自己的底边，而那圈边正好被尾巴盖住看不见。
+   */
+  z-index: 2;
+  box-sizing: border-box;
+  width: 100%;
+  border-radius: 12px 12px 0 0;
+  /* ⚠️ **接近不透明**（0.94）——
+   *
+   * 用户反馈「玻璃太透明导致看不清」：半透明时底下的课表格直接透上来，
+   * 和卡片里的文字**叠在一起**（截图里「今日详情」那格最明显 ——
+   * 「木刻画研究方法（史纲）」和「农历九月廿八」糊成一团）。
+   *
+   * 用户原话「下面的课程不会显示在上面，不然的话就看不清楚了」——
+   * 参考图背后是**空背景**，我们背后是**彩色课表格**，不能照抄它的透明度。
+   *
+   * 有文字的地方就该是**实心的**；玻璃感交给「往下渐隐到透明」的那一段去表现。
+   *
+   * ⚠️ 这一层是**唯一**带 backdrop-filter 的层 ——
+   * 每张卡片再各带一层 blur 的话，一屏十几层实时模糊会把旧机器拖垮。
+   * 卡片的玻璃感靠「半透明渐变 + 描边 + 高光」模拟。
+   */
+  /* 假光源（2026-11）：不靠提高透明度，而是在玻璃表面**画光**。
+   *
+   * 参考图的玻璃感来自"背后有亮光透进来"。我们的底板必须保持 0.94
+   * 不透明（否则课表格会糊在文字上），所以改成在玻璃自己身上画光：
+   *   · 顶部左上一团冷白色漫反射光（radial）—— 像顶上有一盏灯；
+   *   · 顶部再叠一条向下衰减的白色高光（linear）—— 玻璃的厚度感；
+   *   · 底色仍然是那块 0.94 的深色底，文字对比度不变。
+   */
+  background:
+    radial-gradient(120% 62% at 22% -18%,
+      rgba(198, 222, 255, 0.16),
+      rgba(198, 222, 255, 0.05) 42%,
+      rgba(198, 222, 255, 0) 68%),
+    linear-gradient(to bottom,
+      rgba(255, 255, 255, 0.065),
+      rgba(255, 255, 255, 0.015) 22%,
+      rgba(255, 255, 255, 0) 40%),
+    rgba(34, 38, 48, 0.94);
+  /* 只留**上边和左右**的边框，不要下边 ——
+   *
+   * 下边那条 1px 的边框正好横在「实心区 ↔ 渐变尾巴」
+   * 的交界处，看着就是一条**硬边断层** —— 瀑布断成两截就是这么来的。
+   * 去掉它，实心区直接溶进尾巴，才是连续的。
+   */
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  /* 上边是迎光面：比左右更亮，像光从正上方打下来。 */
+  border-top-color: rgba(255, 255, 255, 0.34);
+  border-bottom: none;
+  /* 顶部高光：让玻璃有厚度感。
+   *
+   * ⚠️ **投影只往上打**（负的 y 偏移）——
+   * 往下打的话，投影会落在**尾巴**上（尾巴是半透明的），
+   * 于是交界处出现一条**深色硬带**（截图里就是那块发黑的区域）。
+   * 尾巴自己会渐变出「往下溶」的效果，不需要额外的投影。
+   */
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.34),
+    inset 0 16px 34px rgba(198, 222, 255, 0.05),
+    0 -8px 28px rgba(0, 0, 0, 0.28);
+  -webkit-backdrop-filter: blur(40px) saturate(180%);
+  backdrop-filter: blur(40px) saturate(180%);
+  /* 实心区往下**多留 1px**：那圈「毛玻璃亮边」落在尾巴**里面**，
+   * 被尾巴盖住，从外面看就是连续的。 */
+  margin-bottom: -1px;
+  /* 内边距：卡片要「浮」在底板上，四周留出空隙。
+   * 上下各 8px（卡片离底板边缘有一点呼吸），左右 7px。 */
+  padding: 8px 7px 9px;
+  /* ⚠️ **必须保留 `overflow: hidden`** ——
+   * 圆角外的渐变要靠它裁掉。
+   * 需要滚动时由 `.dpbody.scroll` 改成 `overflow-y: auto`（见文件末尾）。 */
+  overflow: hidden;
+  /* ⚠️ **左右两边也要化开** ——
+   *
+   * 以前实心区是**上下左右都硬边**的矩形，尾巴却是软化的 ——
+   * 两者放在一起就看出是**两个模块拼接**（用户反馈的原话）。
+   *
+   * 现在实心区左右各留一条窄的渐隐带（中间实、两边化），
+   * 它和尾巴的左右渐隐**连成一条曲线** ——
+   * 整个覆盖层从顶部到底部是**同一块**逐渐溶进桌面的玻璃，
+   * 看不出拼接，也看不出矩形边。
+   *
+   * ⚠️ 渐隐带要**窄**（各 6% ≈ 7pt）：太宽的话「＋ 添加待办」这种
+   * 靠边的内容会被削掉。上下方向实心区**完全不淡**（内容区必须清晰）。
+   */
+  -webkit-mask-image: linear-gradient(to right,
+    rgba(0,0,0,0.55) 0%,
+    rgba(0,0,0,1) 6%,
+    rgba(0,0,0,1) 94%,
+    rgba(0,0,0,0.55) 100%);
+  mask-image: linear-gradient(to right,
+    rgba(0,0,0,0.55) 0%,
+    rgba(0,0,0,1) 6%,
+    rgba(0,0,0,1) 94%,
+    rgba(0,0,0,0.55) 100%);
+}
+
+/* 渐变区：实心区底部往下**一直渐变到底**（覆盖层多高就渐多长） */
+/* 渐变尾巴：**瀑布式** —— 一层层往下化开，像内容溶进桌面。
+ *
+ * 为什么要「层」而不是一条直线渐变：
+ * 单条 `linear-gradient` 从 0.96 一路降到 0，中段是**均匀**的半透明 ——
+ * 看上去是一块半透明的色块，不像「内容在往下溶」。
+ *
+ * 改成一叠**每层各自渐变**的横条（repeating-linear-gradient），
+ * 每层都是「自己那格最实 → 到下一格全透」，
+ * 叠起来就有了「一段一段往下化」的瀑布感。
+ *
+ * 层高 22px：太密会看出条纹，太疏会失去瀑布感。
+ */
+.dpfade {
+  position: absolute;
+  left: 0; right: 0;
+  /* ⚠️ **必须和 `.dpbody` 用同一套 backdrop-filter**。
+   *
+   * 实心区有 `blur(26px) saturate(160%)`，尾巴没有 → 两者渲染出来的
+   * 颜色不一样（模糊+饱和过的底 vs 原始底），交界处出现一条**硬边断层**，
+   * 瀑布就断成两截。
+   *
+   * 补上同一套滤镜，两段才是同一种材质，接缝就看不见了。
+   */
+  -webkit-backdrop-filter: blur(40px) saturate(180%);
+  backdrop-filter: blur(40px) saturate(180%);
+  /* 渐变尾巴在**实心区底边**开始（不是面板底边）。
+   *
+   * ⚠️ 以前写的是 `top: 100%` —— 那是「面板底边」，于是尾巴整个跑到
+   * 面板**外面**去了，永远看不见（面板只有 600px 高，尾巴落在 600 之后）。
+   * 正确做法：尾巴贴着实心区的底边往下铺。
+   *
+   * 实心区的高度由 JS 量出来后写进 `--dp-body-h`，这里用 calc 定位。
+   */
+  /* ⚠️ **往上压 1px**（`margin-top: -1px`）——
+   *
+   * 实心区和尾巴是两块独立的盒子，紧挨着的时候中间会留下一条
+   * **1px 的抗锯齿缝**（两边各自半透明，缝里透出底下的课表格，
+   * 看着就是一条亮线 —— 瀑布断成两截就是这么来的）。
+   *
+   * 压 1px 让两者**重叠**，缝就没了，渐变从实心区里**长出来**，
+   * 看上去是一整块连续的瀑布。
+   */
+  top: calc(var(--dp-body-h, 0px) - 1px);
+  margin-top: 0;
+  height: calc(var(--dp-tail, 120px) + 1px);
+  /* 尾巴压在实心区**下面**（见 .dpbody 的 z-index 说明）。 */
+  z-index: 1;
+  pointer-events: none;
+  /* 瀑布式：一条**连续**的浓度曲线 + 几道极淡的横向「水痕」。
+   *
+   * 为什么不是「一层层硬接」：每层起点浓度突变 → 出现横向硬边，
+   * 看上去是条纹而不是水。
+   *
+   * 正确做法：主体是一条**平滑衰减**的渐变（连续、无缝），
+   * 再叠几道**极淡**的水痕横线做「一层层」的层次感 ——
+   * 水痕的浓度差很小（0.03 上下），只提供结构、不产生硬边。
+   */
+  background:
+    /* 假光源（2026-11 第二版）：一团冷光从玻璃**中段**透出来。
+     *
+     * ⚠️ 不能在尾巴顶端另起一条高光带 —— 实心区底部没有对应的光，
+     * 那条带一出现就是一道**亮度台阶**（用户看到的「拼接痕迹」）。
+     * 把光源压到中段、顶端为 0，光才是从实心区底下慢慢亮起来的。
+     */
+    radial-gradient(135% 58% at 20% 42%,
+      rgba(205, 226, 255, 0.10),
+      rgba(205, 226, 255, 0.035) 46%,
+      rgba(205, 226, 255, 0) 74%),
+    /* 两道水痕 —— 第一道从 25px 才开始。
+     *
+     * ⚠️ 以前第一道贴着顶端（0–1px），正好压在和实心区的交界上，
+     * 就是一条**横向亮缝**。顶端必须和实心区完全同色，不能有任何装饰。 */
+    linear-gradient(to bottom,
+      rgba(255, 255, 255, 0) 0px,
+      rgba(255, 255, 255, 0) 24px,
+      rgba(255, 255, 255, 0.028) 25px,
+      rgba(255, 255, 255, 0) 26px,
+      rgba(255, 255, 255, 0) 100%),
+    linear-gradient(to bottom,
+      rgba(255, 255, 255, 0) 0px,
+      rgba(255, 255, 255, 0) 52px,
+      rgba(255, 255, 255, 0.022) 53px,
+      rgba(255, 255, 255, 0) 54px,
+      rgba(255, 255, 255, 0) 100%),
+    /* ⚠️ **深色底：顶端和实心区完全同色，往下迅速变薄**（2026-11 第二版）。
+     *
+     * 以前这里是一块**平的** 0.94 深色，只靠 mask 往下淡 ——
+     * 尾巴上半段（mask 前 30% 还是 alpha=1）就是一块 94% 不透明的深色，
+     * 盖在彩色课格上就是**一层阴影**，不是玻璃。
+     *
+     * 现在：0% 处仍是 0.94（和 `.dpbody` 无缝衔接），
+     * 往下几十像素内迅速降到 ~0.3 —— 模糊过的课格真正透出来，
+     * 玻璃感才出来。尾巴里**没有文字**，不需要挡背景。
+     *
+     * mask 仍负责「整体化开」（见下），两者一起才是连续的瀑布。
+     */
+    linear-gradient(to bottom,
+      rgba(34, 38, 48, 0.94) 0%,
+      rgba(34, 38, 48, 0.88) 2.5%,
+      rgba(37, 43, 56, 0.58) 9%,
+      rgba(41, 49, 64, 0.40) 24%,
+      rgba(45, 54, 70, 0.31) 50%,
+      rgba(48, 58, 75, 0.27) 100%);
+  /* ⚠️ **衰减靠这一层 mask** ——
+   *
+   * mask 作用在整个元素上（背景 + backdrop-filter 的输出**一起**被裁），
+   * 所以模糊和底色会同时往下淡 —— 这就是「瀑布」溶下去的效果。
+   *
+   * ⚠️ 起点必须是**不透明**（alpha=1）—— 实心区 ↔ 尾巴的交界处不能有台阶。
+   * 顶端**不提前化开**（和实心区一样是满的），到 15% 之后才开始往下淡。
+   *
+   * ⚠️ **左右两边必须和 `.dpbody` 用同一条曲线**（2026-11 第二版）——
+   *
+   * 以前尾巴是「左实右虚」：左边从 alpha=1 起（**硬边**），往右一路淡到 0。
+   * 实心区却是左右对称的（两边都 0.55 → 1）。
+   * 两条边缘曲线对不上 → 尾巴左边就是一条**竖直的拼接线**
+   * （截图里那条「中间的痕迹」）。
+   *
+   * 现在两边都用实心区那条对称曲线（0.55 → 1 → 1 → 0.55），
+   * 上下两块在左右边缘上才是同一条线，看不出接缝。
+   *
+   * 两个 mask 图层默认是**相乘**的（intersect）——
+   * 上下淡出 ∩ 左右淡出 = 四边都化开，中心保持实，正是要的。
+   */
+  -webkit-mask-image: linear-gradient(to bottom,
+      rgba(0,0,0,1) 0%,
+      rgba(0,0,0,1) 15%,
+      rgba(0,0,0,0.92) 40%,
+      rgba(0,0,0,0.78) 62%,
+      rgba(0,0,0,0.55) 80%,
+      rgba(0,0,0,0.28) 92%,
+      rgba(0,0,0,0) 100%),
+    linear-gradient(to right,
+      rgba(0,0,0,0.55) 0%,
+      rgba(0,0,0,1) 6%,
+      rgba(0,0,0,1) 94%,
+      rgba(0,0,0,0.55) 100%);
+  mask-image: linear-gradient(to bottom,
+      rgba(0,0,0,1) 0%,
+      rgba(0,0,0,1) 15%,
+      rgba(0,0,0,0.92) 40%,
+      rgba(0,0,0,0.78) 62%,
+      rgba(0,0,0,0.55) 80%,
+      rgba(0,0,0,0.28) 92%,
+      rgba(0,0,0,0) 100%),
+    linear-gradient(to right,
+      rgba(0,0,0,0.55) 0%,
+      rgba(0,0,0,1) 6%,
+      rgba(0,0,0,1) 94%,
+      rgba(0,0,0,0.55) 100%);
+  /* ⚠️ **两个 mask 图层必须显式相乘**（intersect）。
+   *
+   * CSS 规范里 `mask-composite` 的默认值是 `add`（相加）——
+   * 上下淡出 + 左右淡出**相加**的结果是「哪里都不淡」（还是满的），
+   * 于是尾巴的左右边又变成硬边，底部能看出一个矩形。
+   *
+   * `intersect`（相乘）才是要的：四边都化开，中心保持实。
+   *
+   * ⚠️ `-webkit-mask-composite` 用的是**关键字不同的老语法**
+   * （`source-in` ≈ intersect），两个都写上，兼容新旧引擎。
+   */
+  -webkit-mask-composite: source-in;
+  mask-composite: intersect;
+}
+/* 宽态的尾巴：上下淡出（继承基础规则）**乘上**左右淡出 */
+
+/* ---- 覆盖层内部内容（卡片化） ---- */
+
+/* ⚠️ **逐条玻璃卡片**（2026-11 重做）。
+ *
+ * 以前是「三块分组标题 + 条目行」挤在一张玻璃面板里（`.dpsect` / `.dptodo` /
+ * `.dpev` / `.dpfest`），条目之间几乎没有间距，看着很挤。
+ *
+ * 现在改成**每条待办 / 每条日程 / 今日详情各自一张独立玻璃卡片**，
+ * 卡片浮在一整块压暗磨砂底板（`.dpbody`）上，卡片之间留 9px 间距。
+ *
+ * 结构：
+ *   .dpbody            压暗底板（**唯一**带 backdrop-filter 的一层）
+ *     .dpcards         卡片容器（纵向 flex，gap = 卡片间距）
+ *       .dpcard        一张卡片（.todo / .event / .detail / .empty / .ghost）
+ *         .dpcardhd    标签行（小图标 + 类别名）
+ *         .dpcardbody  正文（标题 + 次要信息）
+ *
+ * ⚠️ **为什么底板要接近不透明（0.94）**：
+ * 用户原话「下面的课程不会显示在上面，不然的话就看不清楚了」。
+ * 参考图能那么透是因为它背后是**空背景**；我们背后是**彩色课表格**，
+ * 照抄参考图的透明度会让课表格直接透上来、和卡片文字叠成一团。
+ * 所以底板保持 0.94 的不透明度 + 40px 模糊，卡片自身再压一层深色底。
+ *
+ * ⚠️ **只在 `.dpbody` 上用 backdrop-filter**：
+ * 一屏十几张卡片各带一层 blur = 十几层实时模糊，
+ * 旧机器上会明显掉帧。卡片的玻璃感用「半透明渐变 + 描边 + 高光」模拟。
+ */
+.dpcards {
+  display: flex;
+  flex-direction: column;
+  /* 卡片之间的间距（验收要求 ≥8px）。 */
+  gap: 9px;
+}
+
+/* 一张卡片。
+ *
+ * 圆角 14px + 半透明暗色渐变底 + 细渐变描边 + 顶部 1px 高光 + 外阴影。
+ *
+ * ⚠️ **渐变描边**用伪元素 + `-webkit-mask` 的「xor」技巧实现：
+ *   · 伪元素铺满整卡，背景是一条蓝/紫/青渐变；
+ *   · 用 `padding: 1px` 把中间挖空（mask 的 xor = 反相 = 只留边框）；
+ *   · 伪元素 `pointer-events: none`，不挡点击。
+ *
+ * 为什么不用 `border-image` / `border-color`：
+ *   · `border-color` 只能给纯色，没有渐变；
+ *   · `border-image` 在圆角处会接缝，而且 WKWebView 支持不稳。
+ */
+.dpcard {
+  position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  border-radius: 14px;
+  padding: 9px 9px 10px;
+  /* 假光源（2026-11）：卡片不靠透明，而是靠"光打在玻璃上"的三个特征：
+   *   1. 左上角一团柔和的镜面反光（radial）；
+   *   2. 一条从左上斜着扫过去的高光带（linear）；
+   *   3. 上亮下暗的玻璃底色（光从上面来，越往下越深）。
+   * 底板已经压得足够暗，这里只加光、不降不透明度，正文对比度不受影响。
+   */
+  background:
+    radial-gradient(128% 100% at 14% -22%,
+      rgba(210, 228, 255, 0.19),
+      rgba(210, 228, 255, 0.05) 36%,
+      rgba(210, 228, 255, 0) 60%),
+    linear-gradient(118deg,
+      rgba(255, 255, 255, 0.10),
+      rgba(255, 255, 255, 0.02) 26%,
+      rgba(255, 255, 255, 0) 46%),
+    linear-gradient(to bottom,
+      rgba(58, 70, 92, 0.62),
+      rgba(30, 38, 55, 0.68) 48%,
+      rgba(20, 27, 42, 0.74));
+  /* 上沿一条亮边（迎光），下沿一条极淡的返光；外阴影让卡片浮起来。 */
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.30),
+    inset 1px 0 0 rgba(255, 255, 255, 0.08),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.035),
+    0 6px 18px rgba(0, 0, 0, 0.30),
+    0 1px 2px rgba(0, 0, 0, 0.18);
+  /* 卡片本身**不**裁剪内容（里面的圆点、药丸要能溢出一点点），
+   * 但纵向溢出（超高）由 `.dpbody` 统一裁 + 滚。 */
+  overflow: hidden;
+  /* ⚠️ **卡片本身不做入场动画**。
+   *
+   * 试过 `animation: dpCardIn 150ms ease-out both`（淡入 + 轻微上移），
+   * 但踩了一个坑：
+   * **合成器不跑的时候**（窗口不可见 / 离屏渲染 / 快照模式拍图），
+   * CSS 动画会**永远停在第 0 帧**，而那一帧是 `opacity: 0`
+   * → **整块卡片内容永远看不见**（用户看到的是「点开日期什么也没有」）。
+   *
+   * 去掉 fill-mode 也不行 —— 动画还在跑，只是「补间」没了，
+   * 当前值仍然是第 0 帧的 opacity: 0。
+   *
+   * 面板本身已经有 600ms 的入场动画（clip-path 揭开），
+   * 卡片跟着一起出来就够了，**不需要卡片级的动画**。
+   * （验收也只要求「很轻的淡入」，不是硬性要求。）
+   */
+}
+
+/* 渐变描边（伪元素）。
+ *
+ * `-webkit-mask` + `mask` 都写上：WKWebView 认 `-webkit-mask`，
+ * 标准写法留给别的引擎。`mask-composite: xor` 是「反相」——
+ * 配合 `padding: 1px` 把卡片中间挖空，只留 1px 的边框。
+ */
+.dpcard::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  /* 描边也是"迎光"的：左上角最亮（白色边缘反光），
+   * 往下、往右逐渐过渡成卡片原本的彩色描边 —— 光从左上来。 */
+  background: linear-gradient(145deg,
+    rgba(255, 255, 255, 0.55) 0%,
+    rgba(150, 190, 255, 0.38) 22%,
+    rgba(167, 139, 250, 0.30) 55%,
+    rgba(94, 234, 212, 0.18) 100%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* 左侧 2px 彩色竖条（强调）。
+ *
+ * 用 `::after` 贴在卡片左缘内侧，不占布局宽度。
+ */
+.dpcard::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 7px;
+  bottom: 7px;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  pointer-events: none;
+}
+/* 待办 → 青蓝 */
+.dpcard.todo::after { background: linear-gradient(to bottom, #4fc3f7, #26a69a); }
+/* 日程 → 粉蓝 */
+.dpcard.event::after { background: linear-gradient(to bottom, #f48fb1, #7aa8ff); }
+/* 今日详情 → 紫青 */
+.dpcard.detail::after { background: linear-gradient(to bottom, #a78bfa, #5eead4); }
+
+/* 空状态卡片：更低调、**没有**彩色竖条。 */
+.dpcard.empty {
+  /* 空状态也带一点迎光，保持同一块玻璃的材质。 */
+  background:
+    radial-gradient(120% 100% at 16% -20%,
+      rgba(255, 255, 255, 0.10),
+      rgba(255, 255, 255, 0) 58%),
+    linear-gradient(160deg, rgba(255, 255, 255, 0.035), rgba(24, 30, 44, 0.55));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.025);
+  padding: 8px 9px 9px;
+}
+/* 空状态的描边也要淡（不然一排空卡片很抢眼）。 */
+.dpcard.empty::before {
+  background: linear-gradient(145deg,
+    rgba(255, 255, 255, 0.20),
+    rgba(255, 255, 255, 0.10) 45%,
+    rgba(255, 255, 255, 0.07));
+}
+/* 空状态**不**画竖条 */
+.dpcard.empty::after { display: none; }
+
+/* 「＋ 添加待办」的**幽灵卡**：虚线边框、无渐变底。 */
+.dpcard.ghost {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px dashed rgba(255, 255, 255, 0.18);
+  box-shadow: none;
+  padding: 7px 9px 8px;
+}
+/* 幽灵卡不要渐变描边（虚线边框已经够了）。 */
+.dpcard.ghost::before { display: none; }
+/* 幽灵卡也没有竖条 */
+.dpcard.ghost::after { display: none; }
+
+/* 卡片的标签行：图标 + 类别名（小、灰）。 */
+.dpcardhd {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 9px; font-weight: 600;
+  color: rgba(238, 241, 247, 0.46);
+  letter-spacing: 0.3px;
+  margin-bottom: 5px;
+  line-height: 1;
+}
+.dpcardicon { font-size: 10px; line-height: 1; opacity: 0.9; }
+.dpcardlabel { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* 卡片正文。 */
+.dpcardbody {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.dpempty {
+  font-size: 10.5px;
+  color: rgba(238, 241, 247, 0.34);
+  letter-spacing: 0.2px;
+}
+/* 「读取中…」占位（原生数据还没到）——
+   和「今日无待办」同尺寸同位置，数据回来时只换文字，不会有跳动。 */
+.dpempty.dploading {
+  color: rgba(238, 241, 247, 0.22);
+}
+/* 「今日详情」里的占位（连农历都拿不到时）——
+   在 .dpfest 里是 inline 的，不能带上下 padding（会把卡片撑高）。 */
+.dpfest .dpempty { padding: 0; display: inline; }
+
+/* 待办条目
+ *
+ * ⚠️ **卡片化之后待办条目本身就是 `.dpcard.todo`** ——
+ * 以前这里是独立的 `.dptodo` 行（自带小圆角底 + 边框），
+ * 现在那一层底和边框由**卡片**提供，里面只留「圈 + 标题 + 到期时间」。
+ *
+ * `.dpmain` / `.dpcheck` / `.dptitle` / `.dptime` 保持不变。
+ */
+/* 圈 + 标题：**同一行**，标题拿到全部剩余宽度。
+ *
+ * 窄态（列宽约 119pt）一行放不下「圈 + 标题 + 到期时间」，
+ * 到期时间换到下一行，圈和标题仍然并排 —— 圈不会孤零零掉下来。
+ */
+.dpmain {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.dpcheck {
+  flex: 0 0 auto;
+  width: 11px; height: 11px;
+  border-radius: 50%;
+  margin-top: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.34);
+  background: transparent;
+  position: relative;
+  /* 只有这个圈是「完成」的入口（2026-11 用户确认）——
+     卡片 / 标题点击都不再触发。 */
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+  z-index: 1;
+}
+/* 可点区域比 11px 的圆圈大一圈（-6px），但**视觉上完全不变**。
+   伪元素没有背景，点击仍然命中 .dpcheck 本身。 */
+.dpcheck::before {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+}
+/* 点下去 → **立刻变成蓝色实心球**。
+ *
+ * ⚠️ 不要复用 `.done`：那套样式会同时把标题变灰 + 加删除线，
+ * 用户要求「其他的都不要变」——这里只改圈，标题保持原样。 */
+.dpcard.todo.completing .dpcheck {
+  background: #4f8cff;
+  border-color: #4f8cff;
+}
+/* 完成后停留 1 秒 → 缓慢淡出 + 轻微上移（400ms），然后从列表移除。 */
+.dpcard.todo.leaving {
+  animation: dpTodoLeave 400ms ease forwards;
+  pointer-events: none;
+}
+@keyframes dpTodoLeave {
+  from { opacity: 1; transform: translateY(0); }
+  to   { opacity: 0; transform: translateY(-4px); }
+}
+.dpcard.todo.done .dpcheck {
+  background: #34d399;
+  border-color: #34d399;
+}
+.dpcard.todo.done .dpcheck::after {
+  content: "";
+  position: absolute;
+  left: 3px; top: 0.5px;
+  width: 3px; height: 6px;
+  border: solid rgba(20, 26, 24, 0.9);
+  border-width: 0 1.6px 1.6px 0;
+  transform: rotate(42deg);
+}
+.dptitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11.5px; line-height: 1.35;
+  letter-spacing: 0.2px;
+  /* 不用 break-all —— 窄列里「买牛奶」会被从中间断成「买牛 / 奶」，
+     很难看。改成 break-word：只在词太长时才断。 */
+  /* ⚠️ **不要 `overflow-wrap: anywhere`** ——
+   *
+   * 它会让浏览器在**任何位置**断行（连「牛奶」这种词中间都断），
+   * 窄态列宽只有约 119pt，一断就变成「买牛 / 奶和 / 面包」。
+   *
+   * `word-break: normal` + `line-break: anywhere` 让它**优先在词边界断**，
+   * 实在放不下（比如一整段没有空格的英文）才换行。
+   */
+  word-break: normal;
+  overflow-wrap: break-word;
+  line-break: anywhere;
+}
+.dpcard.todo.done .dptitle {
+  color: rgba(238, 241, 247, 0.36);
+  text-decoration: line-through;
+}
+.dptime {
+  flex: 0 0 auto;
+  font-size: 9.5px;
+  color: rgba(238, 241, 247, 0.48);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.2px;
+  padding-top: 1.5px;
+}
+
+/* ⚠️ **窄列（列宽约 119pt）**：到期时间**换到下一行**。
+ *
+ * 一行放不下「圈 + 标题 + 到期时间」——
+ * 标题只剩 30pt 左右，「买牛奶和面包」被断成「买牛 / 奶和 / 面包」，
+ * 几乎读不出来。
+ *
+ * ⚠️ 宽态已删（2026-11），覆盖层**永远是一列宽** ——
+ * 所以这条规则不再需要 `:not(.wide)` 的条件了。
+ */
+.dptime {
+  /* 换行后缩进一点，挂在标题下面（跟圈对齐，不是顶格） */
+  margin-left: 16px;
+  padding-top: 0;
+  padding-bottom: 1px;
+  font-size: 9.5px;
+}
+
+/* 日程条目 */
+.dpevt {
+  font-size: 11.5px; line-height: 1.35;
+  letter-spacing: 0.2px;
+  word-break: normal;
+  overflow-wrap: break-word;
+  line-break: anywhere;
+}
+.dpevs {
+  font-size: 9.5px;
+  color: rgba(122, 168, 255, 0.92);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.2px;
+}
+
+/* 节日 / 节气 */
+.dpfest {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 5px;
+}
+.dplunar {
+  font-size: 11.5px;
+  color: rgba(238, 241, 247, 0.78);
+  letter-spacing: 0.2px;
+  line-height: 1.35;
+}
+.dpfest .fchip {
+  /* chips 自己一行（flex column 布局下它们会各占一行）——
+   * 用一个内联容器把它们并排。 */
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.dpfest .fchip {
+  padding: 2px 7px;
+  border-radius: 7px;
+  font-size: 9.5px;
+  background: rgba(245, 165, 36, 0.14);
+  border: 1px solid rgba(245, 165, 36, 0.26);
+  color: rgba(245, 178, 77, 0.95);
+}
+
+/* 天气行（拿不到时整行不存在）。 */
+.dpweather {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 10px;
+  color: rgba(238, 241, 247, 0.66);
+  letter-spacing: 0.2px;
+}
+.dpwicon { font-size: 11px; line-height: 1; opacity: 0.9; }
+.dpwdesc { color: rgba(238, 241, 247, 0.72); }
+.dpwtemp {
+  color: rgba(147, 197, 253, 0.95);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 宜 / 忌行。 */
+.dpyiji {
+  display: flex; flex-direction: column; gap: 2px;
+  font-size: 10px;
+  letter-spacing: 0.2px;
+  line-height: 1.35;
+}
+.dpyi { color: rgba(94, 234, 212, 0.92); }
+.dpji { color: rgba(248, 113, 113, 0.86); }
+
+/* 「添加待办」的失败提示（2026-11 加）。
+ *
+ * ⚠️ 以前失败是**完全静默**的 —— 用户点了「添加待办」什么反应都没有，
+ * 只能干瞪眼。现在给一行明确的说明（缺权限 / 没有清单 / 写入被拒）。
+ */
+.dpadderr {
+  font-size: 9.5px;
+  line-height: 1.35;
+  color: rgba(248, 113, 113, 0.92);
+  background: rgba(248, 113, 113, 0.10);
+  border: 1px solid rgba(248, 113, 113, 0.24);
+  border-radius: 8px;
+  padding: 5px 7px;
+  letter-spacing: 0.2px;
+  word-break: normal;
+  overflow-wrap: break-word;
+  line-break: anywhere;
+}
+
+/* 「+ 添加待办」（在幽灵卡里面）。 */
+.dpadd {
+  display: flex; align-items: center; gap: 5px;
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 10.5px;
+  color: rgba(238, 241, 247, 0.56);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  transition: color 160ms ease;
+}
+.dpadd:hover { color: rgba(238, 241, 247, 0.9); }
+.dpadd.tt-hover { color: rgba(238, 241, 247, 0.9); }
+.dpadd .plus { font-size: 12px; line-height: 1; }
+
+/* 「＋ 添加待办」展开后的表单（**在虚线幽灵卡里面**）。
+ *
+ * ⚠️ 两块**平级**、不是一上一下套在同一个框里（2026-11）：
+ *
+ *   ┌ 蓝色标题输入框 ──────┐
+ *   │ 待办内容              │
+ *   └──────────────────────┘
+ *   ┌ 20 ┐ ┌ 00 ┐      [添加]
+ *
+ * 时间那两个小框**不在**蓝色输入框内部 —— 它们是独立的深色小框
+ * （和「课程时间自定义」里的时 / 分框一个观感）。
+ *
+ * 卡片内容宽只有约 86.6pt，所以第二行**不放「时间」两个字** ——
+ * 放了就放不下「时分 + 添加」。时 / 分各 22pt，冒号 4pt，添加按钮靠右。
+ */
+.dpaddform {
+  display: flex; flex-direction: column; align-items: stretch; gap: 6px;
+  width: 100%;
+  min-width: 0;
+}
+.dpinputrow {
+  display: flex; align-items: center; gap: 4px;
+  min-width: 0;
+}
+/* 标题输入框：**蓝边 + 聚焦高亮**（和以前一样，用户一眼知道这里能打字）。
+ *
+ * ⚠️ `flex: 1 1 0` + `width: 100%` 是必须的：
+ * `<input>` 有**固有宽度**（默认 size≈20 字符 ≈ 150px），
+ * 只写 `flex: 1 1 auto` 的话它不会缩到容器宽度 —— 窄列里直接撑爆
+ * （实测标题框 156pt vs 容器 83pt）。
+ */
+.dptitlefield {
+  flex: 1 1 0;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  background: rgba(79, 140, 255, 0.10);
+  border: 1px solid rgba(79, 140, 255, 0.42);
+  border-radius: 8px;
+  padding: 4px 7px;
+  outline: none;
+  color: #fff;
+  font: inherit;
+  font-size: 10.5px;
+  letter-spacing: 0.2px;
+  -webkit-user-select: text;
+  user-select: text;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.dptitlefield:focus {
+  border-color: rgba(79, 140, 255, 0.85);
+  background: rgba(79, 140, 255, 0.16);
+}
+.dptitlefield::placeholder { color: rgba(238, 241, 247, 0.32); }
+/* 时 / 分两个小框：**独立深色小框**，不是蓝框的一部分。
+ *
+ * 尺寸：各 22pt（两位数字 + 等宽数字），窄列里正好放下。
+ * 默认显示 `00`（四个 0），和「课程时间自定义」的时 / 分框一致。
+ */
+input.dptimepart {
+  flex: 0 0 22px;
+  width: 22px;
+  min-width: 0;
+  box-sizing: border-box;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  padding: 4px 0;
+  outline: none;
+  color: #fff;
+  font: inherit;
+  font-size: 10.5px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  -webkit-user-select: text;
+  user-select: text;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+input.dptimepart:focus {
+  border-color: rgba(79, 140, 255, 0.72);
+  background: rgba(79, 140, 255, 0.12);
+}
+.dpcolon {
+  flex: 0 0 4px;
+  width: 4px;
+  text-align: center;
+  font-size: 10px;
+  color: rgba(238, 241, 247, 0.52);
+  line-height: 1;
+}
+/* 时间行右侧的按钮（现在是「**取消**」）。
+ *
+ * ⚠️ 它是「放弃这次输入」，不是「提交」—— 所以颜色**比蓝色淡一点**，
+ * 别让人以为按下去就存进去了（提交是**回车**）。
+ * 编辑态那边的「取消」按钮（`.dpeditbtn`）是同一个意思。
+ */
+.dpok {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: 10px;
+  color: rgba(238, 241, 247, 0.62);
+  cursor: pointer;
+  padding: 0 1px;
+  transition: color 120ms ease;
+}
+.dpok:hover, .dpok.tt-hover { color: #fff; }
+
+/* ---- 待办编辑态（右键「修改…」）----
+ *
+ * 三行，窄列里不溢出：
+ *   [ 标题（蓝边）                  ]
+ *   [ 20 ] : [ 00 ]        ← 独立的深色小框
+ *   [              保存   取消 ]
+ *
+ * 只加静态样式，**没有新的无限动画** —— 空闲耗电不受影响。
+ */
+.dpedit {
+  display: flex; flex-direction: column; gap: 5px;
+  min-width: 0;
+}
+.dpeditrow {
+  display: flex; align-items: center; gap: 4px;
+  min-width: 0;
+}
+/* 标题框：蓝边 + 聚焦高亮（和添加态的标题框一个观感）。 */
+.dpedit input.dpedittitle {
+  flex: 1 1 0;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  background: rgba(79, 140, 255, 0.10);
+  border: 1px solid rgba(79, 140, 255, 0.42);
+  border-radius: 7px;
+  padding: 4px 6px;
+  color: #fff;
+  font: inherit;
+  font-size: 10.5px;
+  letter-spacing: 0.2px;
+  outline: none;
+  -webkit-user-select: text;
+  user-select: text;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.dpedit input.dpedittitle:focus {
+  border-color: rgba(79, 140, 255, 0.85);
+  background: rgba(79, 140, 255, 0.16);
+}
+.dpedit input.dpedittitle::placeholder { color: rgba(238, 241, 247, 0.30); }
+/* 时 / 分小框：复用添加态那套**独立深色小框**样式（见上面的 input.dptimepart）。 */
+.dpeditbtns {
+  display: flex; justify-content: flex-end; gap: 5px;
+  margin-top: 1px;
+}
+.dpeditbtn {
+  font: inherit;
+  font-size: 9.5px;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(238, 241, 247, 0.72);
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+.dpeditbtn.primary {
+  color: #fff;
+  background: rgba(79, 140, 255, 0.26);
+  border-color: rgba(79, 140, 255, 0.55);
+}
+.dpeditbtn:hover, .dpeditbtn.tt-hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.10);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+.dpeditbtn.primary:hover, .dpeditbtn.primary.tt-hover {
+  background: rgba(79, 140, 255, 0.38);
+  border-color: rgba(79, 140, 255, 0.72);
+}
+
+/* 内部滚动（宽态内容超高时） */
+.dpscroll {
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.dpscroll::-webkit-scrollbar { width: 4px; }
+.dpscroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 2px;
+}
+.dpscroll::-webkit-scrollbar-track { background: transparent; }
+
+/* ⚠️ **面板内滚动**（2026-11 改）。
+ *
+ * 以前窄态是「只显示前 N 条 + 「还有 N 条」」—— 现在**一条都不截断**，
+ * 装不下就在面板里滚（用户明确要求）。
+ *
+ * 滚动条挂在 `.dpbody`（实心区）上：
+ *   · 底板本身不动，视觉上不会整块漂移；
+ *   · `overflow-y: auto` **只在溢出时才显示滚动条** ——
+ *     内容不长时不会出现一条多余的滚动条（验收要求）。
+ *
+ * 必须比 .dpbody 的 overflow:hidden 更具体 —— 基础规则里是
+ * `overflow: hidden`（用来裁掉圆角外的渐变），这里要改成 auto。
+ */
+.dpbody.scroll,
+.dpbody.narrow.scroll {
+  overflow-y: auto !important;
+  overflow-x: hidden;
+  /* 滚动时别让文本被选中（拖滚动条会拖出一片选区）。 */
+  -webkit-user-select: text;
+  user-select: text;
+}
+.dpbody.scroll::-webkit-scrollbar { width: 4px; }
+.dpbody.scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 2px;
+}
+.dpbody.scroll::-webkit-scrollbar-track { background: transparent; }
+
+/* ── 折叠 / 展开（2026-11）─────────────────────────────────────────
+ * 折叠 = 只留顶栏 + 状态条 + 表头：网格塞进 `.gridwrap`，容器高度从整格
+ * 收到表头（38px）。高度由 JS（`window.ttSetCollapse`）逐帧写，这里只负责
+ * 「裁切 + 正文淡出」——不动网格内部几何，表头 / 日期列坐标一磅都不变。
+ */
+.gridwrap { overflow: hidden; }
+
+/* 表头以下的格子跟着折叠进度淡出（--tt-collapse 由 JS 逐帧写）。
+ * ⚠️ 放在文件末尾：要和 `.course.off { opacity: 1 }` 抢同优先级，后写的赢。 */
+.grid > .tcell,
+.grid > .cell { opacity: calc(1 - var(--tt-collapse, 0)); }
+
+/* 状态条最右侧的折叠按钮（用户确认的位置「月份的右边」= 状态条右端）。
+ * 维护约定：`:hover` 必须配一份 `.tt-hover`（模式 B 收不到真 hover）。 */
+.collapsebtn {
+  flex: 0 0 auto;
+  /* ⚠️ 按钮的**占位高度**不能超过状态条原来的内容高（15px），否则状态条会长高
+     1px、整张卡片跟着变高 1px（`TimetableLayout` 的公式 / 夹屏 / 自检都按 773）。
+     视觉上做 22px，用负 margin 把占位压回 15px（上下各溢出 3.5px 由状态条
+     的 9px 内边距兜着，不会顶到卡片边）。 */
+  width: 22px; height: 22px;
+  margin: -3.5px 0 -3.5px 2px;
+  border-radius: 7px;
+  display: flex; align-items: center; justify-content: center;
+  /* 常驻一层很淡的底：状态条上「自由安排」右边本来什么都没有，
+     纯图标容易被当成装饰看不见。 */
+  background: rgba(255, 255, 255, 0.07);
+  color: rgba(238, 241, 247, 0.78);
+  cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+/* 折线箭头（不依赖字体里的 ▾ / ▴ 字形）：一个方块只留右边 / 下边两条边，
+ * 转 45° 就是「⌄」，再转 180° 就是「⌃」。线宽 1.6px、圆头，和设置面板的
+ * 返回箭头风格一致。 */
+.collapseico {
+  width: 6px; height: 6px;
+  border-right: 1.6px solid currentColor;
+  border-bottom: 1.6px solid currentColor;
+  border-radius: 0 0 1px 0;
+  transform: translateY(-1px) rotate(45deg);
+  transition: transform 0.2s ease;
+}
+.collapsebtn.collapsed .collapseico {
+  transform: translateY(1px) rotate(-135deg);
+}
+.collapsebtn:hover,
+.collapsebtn.tt-hover {
+  background: rgba(255, 255, 255, 0.16);
+  color: rgba(238, 241, 247, 1);
+}

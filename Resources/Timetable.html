@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>桌面课表</title>
+<link rel="stylesheet" href="Timetable.css">
+<style>
+  /* 页面本身透明：卡片是唯一可见内容，交给原生窗口摆到桌面上 */
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    /* ⚠️ **必须锁死滚动条**（2026-11）。
+       网页的版式宽度是写死的 1148px，而缩放后 WKWebView 的视口
+       在 CSS px 里可能只有 1147（pageZoom 取整）或 804（CSS transform
+       缩放时视口仍是窗口大小）—— 只要视口比 1148 小一点点，
+       WebKit 就会加滚动条：它不但在卡片右边的投影留白里露出灰条，
+       还会**吃掉 24px 版式宽度**，让卡片重新排版、变高。
+       用户看到的「缩放后比例不对 / 卡片高了一截」就是它引起的。
+       页面永远不需要整页滚动（覆盖层自己滚），所以直接锁掉。 */
+    overflow: hidden;
+  }
+  /* 卡片在原生窗口里的位置是 (90, 90)（四周留了 90pt 的投影空间），
+     网页里用同样的内边距把卡片摆到同一个位置，快照才能严丝合缝地贴上。 */
+  body {
+    width: 1148px;
+    padding: 90px;
+    box-sizing: border-box;
+    /* 缩小档位由原生给 body 设 transform（见 WebCardRenderer.applyScale）。 */
+  }
+</style>
+</head>
+<body>
+<div class="ttwrap" id="root"></div>
+<script src="Timetable.js"></script>
+</body>
+</html>
