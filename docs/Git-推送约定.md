@@ -29,6 +29,16 @@ rsync -a --exclude='.DS_Store' --exclude='*.bak' \
 「要不要提交到 git」。补丁版（x.y.z+1）**不问、不推送** —— 改动照常写进
 CHANGELOG / 文档，等下一次大版本跃迁时一起推。
 
+## 首次推送记录（2026-11-08）
+
+- 远端改用 **SSH**（`git@github.com:mzx899/dsh-desktoptimetable.git`）：
+  HTTPS 没有写入凭据（`No anonymous write access`），
+  SSH key（`~/.ssh/id_ed25519`）已验证为 `Hi mzx899!`。
+- 推送：`c9e48e1..ecb4573  code -> code`（快进，没有 force）。
+- 结果：`code` = `ecb4573`（142 个文件），`main` 仍停在 `c9e48e1`，**没动**。
+- 验证：`git clone -b code` 到 `/tmp` → `make app` 通过、`make test` **2052 项断言全过**
+  （证明仓库里这份源码完整、可编译）。
+
 ## 推送步骤（用户同意后）
 
 ```bash
