@@ -78,7 +78,10 @@
   141 个文件 / 4.3MB），`git init -b code` + `remote origin` 指向
   `https://github.com/mzx899/dsh-desktoptimetable.git`，并把 push refspec 锁成
   `code:code`（`main` 永远不会被动）；本地已 rebase 到远端 `origin/code` 之上，
-  下次推送是快进、不需要 force。**按新约定：补丁版不推**（当前 1.4.3 未推送）。
+  下次推送是快进、不需要 force。**按新约定：补丁版不推**。
+  后记：用户要求「这次是源码缺失后第一次补上，先推上去」→ 已推 `code`：
+  `c9e48e1..ecb4573`（随后补一条文档提交 `0b7f5f7`），`main` 仍为 `c9e48e1` 未动；
+  HTTPS 无写权限，远端已切 SSH；从 GitHub 克隆验证 `make app` + `make test` 2052 全过。
 - 补记六：用户说「图钉比原来宽」——网页里写死 `17×17` 把符号拉成了正方形；
   改成 `height:17px; width:auto`（原比例，100% 实测 14.8×17）。
 - 补记五：用户说「图钉点不动」——视觉搬进网页后，原生 `PushPinButton` 还留在
