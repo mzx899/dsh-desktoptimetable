@@ -1254,7 +1254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // 日期覆盖层的 intent（datePanelOpen / datePanelToggle / …）
         // 单独交给 DayPanelController 处理。
-        if action.hasPrefix("datePanel") || action.hasPrefix("todo") {
+        if action.hasPrefix("datePanel") || action.hasPrefix("todo") || action.hasPrefix("diary") {
             dayPanel?.handle(action: action, payload: payload)
             return
         }

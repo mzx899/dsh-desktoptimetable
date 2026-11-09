@@ -60,6 +60,10 @@ click the gear to configure.
 - **时间输入不打断自己**：在标题框 / 「时」框 / 「分」框之间来回点，
   **键盘不会断**（不用重新点一次输入框），输入时间时**上面的待办事项也不会消失**
   （1.4.6 修：以前切框会把表单整块重画 → 待办卡被换掉、键盘断开）
+- **日记**：日期覆盖层里和「待办事项 / 日历行程」并列的**第三块内容**
+  （琥珀色竖条那张卡）。点「＋ 写日记」写标题 + 正文；点已有的一条进入编辑态，
+  可以修改或删除。数据存在 `<数据目录>/diary.json`，**不进系统日历 / 提醒事项**；
+  在设置 →「日记」板块里可以集中管理（列表 / 新建 / 编辑 / 删除）。
 - **已完成的提醒事项**：设置 → 提醒 →「日期覆盖层」卡片里的第三行，默认收起；
   点开就在卡片内展开，跨**所有清单**查看已完成项（每行带清单名），
   可搜索 / 按清单筛选、恢复为未完成、删除单条，或全部删除
@@ -895,7 +899,8 @@ Sources/DesktopTimetable/
 | `DesktopTimetable-1.3.3.app` | 1.3.3 | `com.desktoptimetable.app.v120` | 第三代上一版（放到最大不再被画布裁；卡片始终在画布正中），归档在 `版本迭代/` |
 | `DesktopTimetable-1.4.0.app` | 1.4.0 | `com.desktoptimetable.app.v120` | 第三代上一版（课表折叠 / 展开），归档在 `版本迭代/` |
 | `DesktopTimetable-1.4.1.app` | 1.4.1 | `com.desktoptimetable.app.v120` | 第三代上一版（折叠态缩放按顶边 / 展开不再被裁），归档在 `版本迭代/` |
-| `DesktopTimetable-1.4.8.app` | 1.4.8 | `com.desktoptimetable.app.v120` | 第三代，**最新源码版**（弹窗文案精简 / 选项卡铺满 / 课表数据按钮 / 合并差异页修复与玻璃化），归档在 `版本迭代/` |
+| `DesktopTimetable-1.5.0.app` | 1.5.0 | `com.desktoptimetable.app.v120` | 第三代，**最新源码版**（新增「日记」：日期覆盖层第三块 + 设置第 5 个板块），归档在 `版本迭代/` |
+| `DesktopTimetable-1.4.8.app` | 1.4.8 | `com.desktoptimetable.app.v120` | 第三代上一版（弹窗文案精简 / 选项卡铺满 / 课表数据按钮 / 合并差异页修复与玻璃化），归档在 `版本迭代/` |
 | `DesktopTimetable-1.4.7.app` | 1.4.7 | `com.desktoptimetable.app.v120` | 第三代上一版（弹窗换外观：深色玻璃底 + 边缘假光），归档在 `版本迭代/` |
 | `DesktopTimetable-1.4.6.app` | 1.4.6 | `com.desktoptimetable.app.v120` | 第三代上一版（修「时间输入断键盘 / 输入时间时待办消失」），归档在 `版本迭代/` |
 | `DesktopTimetable-1.4.5.app` | 1.4.5 | `com.desktoptimetable.app.v120` | 第三代上一版（修「添加待办键盘进不去 / 取消要点两下」），归档在 `版本迭代/` |
@@ -973,6 +978,11 @@ WebKit 在 `pageZoom < 1` 时会按 9pt 最小逻辑字号把小字撑大，
 1.4.4 是 1.4.3 的**补丁版**：折叠之后点表头日期**保持折叠**、直接弹出日历 / 待办面板
 （面板挂在卡片上，从折叠条底下垂出来）；以前是「先展开课表再开面板」。
 回归入口：`--verify-collapse-panel`。
+
+1.5.0 是**次版本**：新增「**日记**」——日期覆盖层里和「待办事项 / 日历行程」并列的
+第三块内容（琥珀竖条卡：列表 / 「＋ 写日记」/ 点条目编辑 / 删除），数据存
+`<数据目录>/diary.json`；设置面板从 4 个板块变 **5 个**，新增「日记」板块专门管理
+（列表 + 新建 / 编辑 / 删除）。回归入口：`--verify-diary`。
 
 1.4.8 是 1.4.7 的**补丁版**（6 件事，都是文案 / 版式 / 外观修复）：
 导入决策弹窗去掉重复清单、删除整门课程的红色按钮改叫「删除」、导入选项卡铺满居中、
@@ -1061,8 +1071,9 @@ DesktopTimetable/
 │   ├── DesktopTimetable-1.4.5.app  ← 上一版（修「添加待办键盘进不去 / 取消要点两下」）
 │   ├── DesktopTimetable-1.4.6.app  ← 上一版（修「时间输入断键盘 / 待办消失」）
 │   ├── DesktopTimetable-1.4.7.app  ← 上一版（弹窗玻璃底 + 边缘假光）
-│   └── DesktopTimetable-1.4.8.app  ← 最新构建（文案 / 选项卡 / 差异页）
-├── Sources/               ← 唯一源码，A/B 两种模式都在这里
+│   ├── DesktopTimetable-1.4.8.app  ← 上一版（文案 / 选项卡 / 差异页）
+│   └── DesktopTimetable-1.5.0.app  ← 最新构建（新增日记）
+├── Sources/               ← 唯一源码，A/B 两种模式都在这里（日记：Model/DiaryStore.swift）
 ├── Resources/
 ├── Tests/
 ├── docs/
@@ -1086,7 +1097,7 @@ DesktopTimetable/
 └── README.md
 ```
 
-改完代码 `make install` 只更新**当前版**那个 App（`DesktopTimetable-1.4.8.app`，其中 `VERSION` 在 `Makefile` 里统一控制），
+改完代码 `make install` 只更新**当前版**那个 App（`DesktopTimetable-1.5.0.app`，其中 `VERSION` 在 `Makefile` 里统一控制），
 旁边的 1.0.0 / 1.0.1 / 1.1.2 保持原样不动；
 A 模式用 `make run-a` 或 `DT_SNAPSHOT=1` 启动，不再保留第三份 `.app`。
 

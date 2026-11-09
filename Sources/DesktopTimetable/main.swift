@@ -500,6 +500,124 @@ if arguments.contains("--verify-settings-card") {
 }
 
 
+if arguments.contains("--verify-diary") {
+    // 自检：日记的整条链路（2026-11-10 新增）。
+    //
+    // 验四件事：
+    //   1. 日期覆盖层的 intent（diaryAdd / diaryUpdate / diaryDelete）真的写进
+    //      `<DT_DATA_DIR>/diary.json`，并且内容即时反映到面板状态里；
+    //   2. 设置面板「日记」板块读的是**同一份文件**（列表条数 / 摘要）；
+    //   3. 换一天看不到别的日子的日记；
+    //   4. 删除之后文件里也真的没了。
+    guard let dataDir = ProcessInfo.processInfo.environment["DT_DATA_DIR"], !dataDir.isEmpty else {
+        print("❌ --verify-diary 需要 DT_DATA_DIR（临时目录）")
+        exit(2)
+    }
+    print("数据目录：\(dataDir)")
+
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+
+    final class EmptyWeather: DayPanelWeatherProvider {
+        func weather(for coordinate: CLLocationCoordinate2D) -> DayPanelWeather? { nil }
+        func requestCurrentLocation(_ completion: @escaping (CLLocationCoordinate2D?) -> Void) {
+            completion(nil)
+        }
+    }
+
+    var problems: [String] = []
+    let monday = WeekMath.mondayOfWeek(Date())
+    let fake = FakeEventKitStore()
+    var pushedContents: [[String: Any]] = []
+    let panel = DayPanelController(settings: DayPanelSettings(enabled: true),
+                                   festivalProvider: DayPanelFestivalProviderFactory.make(),
+                                   todayIndex: 1,
+                                   baseMonday: monday,
+                                   eventStore: fake,
+                                   weatherProvider: EmptyWeather())
+    panel.onStateChange = { payload in
+        if let one = payload["dayPanel"] as? [String: Any] { pushedContents.append(one) }
+    }
+
+    // ---- 1. 打开第 3 天，加一条 ----
+    panel.handle(action: "datePanelOpen", payload: ["day": 3])
+    RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+    panel.handle(action: "diaryAdd",
+                 payload: ["day": 3, "title": "自检日记", "body": "第一行\n第二行", "time": "20:30"])
+    RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+
+    let afterAdd = pushedContents.last?["diary"] as? [[String: Any]] ?? []
+    if afterAdd.count != 1 { problems.append("加一条之后面板里应该有 1 条日记（实际 \(afterAdd.count)）") }
+    if (afterAdd.first?["title"] as? String) != "自检日记" {
+        problems.append("标题没进面板：\(afterAdd.first?["title"] ?? "nil")")
+    }
+    let file = URL(fileURLWithPath: dataDir).appendingPathComponent("diary.json")
+    if !FileManager.default.fileExists(atPath: file.path) {
+        problems.append("diary.json 没写出来")
+    }
+    let store = DiaryStore(directory: URL(fileURLWithPath: dataDir))
+    if store.count() != 1 { problems.append("文件里应该有 1 条（实际 \(store.count())）") }
+    let entryID = store.all().first?.id ?? ""
+    if entryID.isEmpty { problems.append("拿不到新条目的 id") }
+
+    // ---- 2. 改 ----
+    panel.handle(action: "diaryUpdate",
+                 payload: ["day": 3, "id": entryID, "title": "改过的日记",
+                           "body": "正文变了", "time": "08:05"])
+    RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+    let afterUpdate = pushedContents.last?["diary"] as? [[String: Any]] ?? []
+    if (afterUpdate.first?["title"] as? String) != "改过的日记" {
+        problems.append("改完之后面板里的标题没变：\(afterUpdate.first?["title"] ?? "nil")")
+    }
+    if store.entries(on: DiaryStore.dateKey(monday)).isEmpty == false {
+        // 故意不在这里断言 —— 第 3 天不是周一，下面用「换天」来验隔离。
+    }
+
+    // ---- 3. 换一天：看不到第 3 天的日记 ----
+    panel.handle(action: "datePanelOpen", payload: ["day": 5])
+    RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+    let otherDay = pushedContents.last?["diary"] as? [[String: Any]] ?? []
+    if !otherDay.isEmpty { problems.append("换到第 5 天还能看到第 3 天的日记（\(otherDay.count) 条）") }
+
+    // ---- 4. 设置面板读同一份文件 ----
+    let ts = TimetableStore()
+    _ = try? ts.migrateLegacyIfNeeded(defaultName: "自检课表")
+    let ctl = SettingsWindowController(store: ts.configStore, timetableStore: ts) {}
+    ctl.buildWindow()
+    ctl.expandTo(.diary)
+    ctl.window?.contentView?.layoutSubtreeIfNeeded()
+    RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+    let probe = ctl.probeDiarySection()
+    if probe.count != 1 {
+        problems.append("设置「日记」板块应该显示 1 行（实际 \(probe.count)）")
+    }
+    if !probe.summary.contains("共 1 篇") {
+        problems.append("设置「日记」摘要不对：\(probe.summary)")
+    }
+
+    // ---- 5. 删 ----
+    panel.handle(action: "datePanelOpen", payload: ["day": 3])
+    RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+    panel.handle(action: "diaryDelete", payload: ["day": 3, "id": entryID])
+    RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+    if store.count() != 0 { problems.append("删完之后文件里还有 \(store.count()) 条") }
+    let afterDelete = pushedContents.last?["diary"] as? [[String: Any]] ?? []
+    if !afterDelete.isEmpty { problems.append("删完之后面板里还有 \(afterDelete.count) 条") }
+
+    // ---- 6. 空内容不落盘 ----
+    panel.handle(action: "diaryAdd", payload: ["day": 3, "title": "  ", "body": "  ", "time": ""])
+    RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+    if store.count() != 0 { problems.append("空日记不该落盘（实际 \(store.count()) 条）") }
+
+    if problems.isEmpty {
+        print("✅ 日记（面板新增 / 修改 / 删除 / 换天隔离 / 设置列表）：通过")
+        exit(0)
+    } else {
+        for p in problems { print("❌ \(p)") }
+        exit(1)
+    }
+}
+
 if arguments.contains("--verify-data-buttons") {
     // 自检：「课表数据」卡片那两个按钮（2026-11-09 用户要求）。
     //
@@ -9187,6 +9305,8 @@ if arguments.contains("--shot-settings") {
     else if arguments.contains("system") { shotSection = .system }
     // 「课表」板块：里面有「课表数据」卡片（导入课表 / 在访达中显示那两个按钮）。
     else if arguments.contains("timetable-data") { shotSection = .timetable }
+    // 「日记」板块（2026-11-10 新增）。
+    else if arguments.contains("diary-page") { shotSection = .diary }
     else { shotSection = .reminder }
     ctl.expandTo(shotSection)
     ctl.window.layoutIfNeeded()
@@ -9853,6 +9973,84 @@ if let idx = arguments.firstIndex(of: "--shot-day-panel") {
     }
 
     // 可选：**真的点一下待办前面的空心圆**，截「变蓝」和「正在淡出」两张图
+
+    // ---- 日记：出图（2026-11-10 新增）----
+    //
+    // 用法：`--shot-day-panel <out.png> diaryedit`
+    // 图 1 列表态（注入两篇）/ 图 2 编辑态（点「＋ 写日记」并填好内容）。
+    if arguments.contains("diaryedit") {
+        func snapDiary(_ path: String, _ tag: String) {
+            var rect: NSRect = renderer.webView.bounds
+            var raw: String?
+            renderer.evaluateForTest(
+                "(function(){var b=document.querySelector('.dpcards');" +
+                "if(!b)return '';var r=b.getBoundingClientRect();" +
+                "return JSON.stringify({x:r.left-8,y:r.top-40,w:r.width+16,h:r.height+80});})();"
+            ) { r in raw = r }
+            for _ in 0..<60 {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+                if raw != nil { break }
+            }
+            if let s = raw, let data = s.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Double],
+               let x = obj["x"], let y = obj["y"], let w = obj["w"], let h = obj["h"] {
+                rect = NSRect(x: x, y: renderer.webView.bounds.height - y - h, width: w, height: h)
+            }
+            var done = false
+            let cfg = WKSnapshotConfiguration()
+            cfg.rect = rect
+            renderer.webView.takeSnapshot(with: cfg) { image, _ in
+                defer { done = true }
+                guard let image, let tiff = image.tiffRepresentation,
+                      let rep = NSBitmapImageRep(data: tiff),
+                      let data = rep.representation(using: .png, properties: [:]) else { return }
+                try? data.write(to: URL(fileURLWithPath: path))
+                print("已截图 \(tag) → \(path) (\(rep.pixelsWide)x\(rep.pixelsHigh))")
+            }
+            for _ in 0..<120 {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+                if done { break }
+            }
+        }
+
+        let injectDiary = """
+        (function () {
+          var fest = { lunar: '九月十二', term: '', festivals: [], weather: null, yi: '', ji: '' };
+          var festAll = {};
+          for (var d = 1; d <= 7; d++) festAll[String(d)] = fest;
+          var panel = { day: 3, todos: [], events: [], diary: [
+              { id: 'd1', title: '本周计划', body: '周三交报告\\n记得带U盘', time: '20:00' },
+              { id: 'd2', title: '', body: '只有正文、没有标题的这一篇。', time: '' }
+            ], festival: fest };
+          window.ttUpdate({ dayPanel: panel, dayFestivals: festAll,
+            dayFlags: {}, courses: [], viewWeek: 2 });
+          window.ttDayPanelOpen(3, false);
+          return 'ok';
+        })();
+        """
+        renderer.evaluateForTest(injectDiary) { r in print("注入日记：\(r ?? "nil")") }
+        for _ in 0..<40 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+
+        let base = (out as NSString).deletingPathExtension
+        snapDiary(base + "-list.png", "日记列表")
+
+        // 图 2：编辑态（点「＋ 写日记」再填内容）
+        renderer.evaluateForTest(
+            "(function(){var a=document.querySelector('.dpdiaryadd');if(a)a.click();" +
+            "var t=document.querySelector('.dpdiary-title');" +
+            "if(t){t.value='今天记一笔';t.dispatchEvent(new Event('input',{bubbles:true}));}" +
+            "var tm=document.querySelector('.dpdiary-time');" +
+            "if(tm){tm.value='21:30';tm.dispatchEvent(new Event('input',{bubbles:true}));}" +
+            "var b=document.querySelector('.dpdiary-text');" +
+            "if(b){b.value='下午把差异页的空列表修好了。\\n明天继续。';" +
+            "b.dispatchEvent(new Event('input',{bubbles:true}));}" +
+            "return 'ok';})();"
+        ) { r in print("打开写日记：\(r ?? "nil")") }
+        for _ in 0..<40 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+        snapDiary(base + "-edit.png", "写日记表单")
+        exit(0)
+    }
+
     // （`--shot-day-panel <out> complete`）。
     //
     // 这里只看**网页层**：两条待办是直接注入的，原生的 `todoToggle` 找不到
@@ -11060,6 +11258,75 @@ if arguments.contains("--verify-day-panel-click") {
     print("[诊断] 取消添加后：\(afterCancel?.description ?? "nil")")
     check((afterCancel?["err"] as? Bool) == false, "取消添加之后红色提示必须消失")
     check((afterCancel?["adding"] as? Bool) == false, "取消添加之后输入框必须收起")
+
+    // ---- 日记：真实点击「＋ 写日记」→ 填内容 → 保存 → 原生落盘 → 面板刷新 ----
+    //
+    // 2026-11-10 新增。这条走的是**完整链路**：
+    // 真实鼠标事件 → 网页表单 → post('diaryAdd') → DayPanelController 写 diary.json
+    // → pushState → 网页里出现这篇日记。
+    if realClick(".dpdiaryadd", "＋ 写日记") {
+        pause(0.8)
+        let opened = eval("""
+        (function () {
+          var f = document.querySelector('.dpdiaryform');
+          var t = document.querySelector('.dpdiary-title');
+          return JSON.stringify({
+            formVisible: !!(f && f.style.display !== 'none'),
+            hasTitle: !!t,
+            focus: document.activeElement ? (document.activeElement.className || '') : ''
+          });
+        })();
+        """)
+        print("[诊断] 打开写日记：\(opened?.description ?? "nil")")
+        check((opened?["formVisible"] as? Bool) == true, "点「＋ 写日记」之后表单要展开")
+        check((opened?["hasTitle"] as? Bool) == true, "写日记表单里要有标题输入框")
+        check((delegate.testWebRenderer?.testTextInputActive ?? false),
+              "写日记时也要进入文本输入模式（否则打不了字）")
+
+        _ = eval("""
+        (function () {
+          function set(el, v) {
+            if (!el) return;
+            el.value = v;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+          set(document.querySelector('.dpdiary-title'), '自检日记');
+          set(document.querySelector('.dpdiary-time'), '20:30');
+          set(document.querySelector('.dpdiary-text'), '正文第一行\\n正文第二行');
+          return JSON.stringify({ ok: true });
+        })();
+        """)
+        pause(0.2)
+        realClick(".dpdiaryform .dpok", "保存日记")
+        pause(1.2)
+        let saved = eval("""
+        (function () {
+          var data = (window.S && window.S.dayPanel) || {};
+          var list = data.diary || [];
+          var rows = document.querySelectorAll('.dpdiaryrow');
+          return JSON.stringify({
+            count: list.length,
+            title: list.length ? list[0].title : null,
+            time: list.length ? list[0].time : null,
+            rows: rows.length,
+            rowText: rows.length ? (rows[0].textContent || '').replace(/\\s+/g, ' ').trim() : ''
+          });
+        })();
+        """)
+        print("[诊断] 保存日记后：\(saved?.description ?? "nil")")
+        // ⚠️ 断言读 **DOM 行**，不读 `window.S.dayPanel.diary`：
+        // 面板数据是按天缓存的（`DP.loaded`），刚写的那篇在 DOM 里、
+        // 缓存里的那份要等下一次整推才更新 —— 读缓存会误判。
+        let rowText = (saved?["rowText"] as? String) ?? ""
+        check((saved?["rows"] as? NSNumber)?.intValue == 1, "保存之后列表里要出现那一行")
+        check(rowText.contains("自检日记"), "列表行里要有刚写的标题（实际「\(rowText)」）")
+        check(rowText.contains("正文第一行"), "列表行里要显示正文")
+        let diaryFile = URL(fileURLWithPath: ProcessInfo.processInfo.environment["DT_DATA_DIR"] ?? "")
+            .appendingPathComponent("diary.json")
+        check(FileManager.default.fileExists(atPath: diaryFile.path),
+              "diary.json 要真的写出来（\(diaryFile.path)）")
+    }
+
 
     if problems.isEmpty {
         print("✅ 日期覆盖层真实点击（添加待办 / 圆圈完成）：通过")

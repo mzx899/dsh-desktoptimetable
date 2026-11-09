@@ -266,6 +266,8 @@
   // =====================================================================
 
   var DP = {
+    // 日记表单状态：null / {mode:'add'} / {mode:'edit', id}
+    diaryForm: null,
     day: null,       // 当前显示的是哪一列（1…7），null = 没打开
     // ⚠️ **不再有「宽态」**（2026-11 去掉双击展开）——
     //
@@ -2097,6 +2099,195 @@
   // ⚠️ **永远渲染**（哪怕一条日程都没有）——
   // 三张卡片必须都在，缺一块的话面板每次数据到达的时机不同，
   // 高度会跳来跳去（用户看到的是「内容忽上忽下」）。
+  // ---------------------------------------------------------------------------
+  // 日记（2026-11-10 新增）
+  //
+  // 它是日期覆盖层里的**第三块**内容：待办（提醒事项）/ 日程（系统日历）/
+  // 日记（app 自己的 diary.json）。数据由原生 `DayPanelController` 推来：
+  //   data.diary = [{ id, title, body, time }]
+  //
+  // ⚠️ 表单节点**只创建一次**（`ensureDiaryForm`），之后只切 display / 改 value ——
+  // 和「添加待办」同一个教训：每次重绘重建 input 会把元素摘下来再挂回去，
+  // 结果就是失焦 + 键盘断。
+  var DP_diaryCard = null;
+  var DP_diaryBody = null;
+  var DP_diaryList = null;
+  var DP_diaryFormEl = null;
+  var DP_diaryTitleEl = null;
+  var DP_diaryTimeEl = null;
+  var DP_diaryTextEl = null;
+  var DP_diaryDeleteEl = null;
+  var DP_diaryDay = null;
+
+  function diaryTimeText(v) {
+    // 只收数字：`2030` / `20:30` / `9:5` 都归成 `HH:mm`；空 = 不写时间。
+    var digits = String(v || '').replace(/\D/g, '');
+    if (!digits) return '';
+    if (digits.length === 1) digits = '0' + digits;
+    if (digits.length === 2) return digits + ':00';
+    if (digits.length === 3) digits = '0' + digits;
+    digits = digits.slice(0, 4);
+    var h = parseInt(digits.slice(0, 2), 10);
+    var m = parseInt(digits.slice(2, 4), 10);
+    if (!(h >= 0 && h <= 23)) h = 0;
+    if (!(m >= 0 && m <= 59)) m = 0;
+    return ('0' + h).slice(-2) + ':' + ('0' + m).slice(-2);
+  }
+
+  function ensureDiaryForm() {
+    if (DP_diaryFormEl) return DP_diaryFormEl;
+    DP_diaryTitleEl = h('input', {
+      class: 'dpdiary-title', type: 'text', placeholder: '标题（可空）',
+      autocomplete: 'off', spellcheck: 'false'
+    });
+    DP_diaryTitleEl.addEventListener('focus', function () {
+      post('textInputFocus', {});
+    });
+    DP_diaryTextEl = h('textarea', {
+      class: 'dpdiary-text', placeholder: '写点什么…', rows: '3'
+    });
+    DP_diaryTextEl.addEventListener('focus', function () {
+      post('textInputFocus', {});
+    });
+
+    var save = h('span', {
+      class: 'dpok', text: '保存',
+      onclick: function (e) { e.stopPropagation(); submitDiary(); }
+    });
+    var cancel = h('span', {
+      class: 'dpcancel', text: '取消',
+      onclick: function (e) { e.stopPropagation(); closeDiaryForm(); }
+    });
+    DP_diaryDeleteEl = h('span', {
+      class: 'dpddel', text: '删除',
+      onclick: (function () {
+        return function (e) {
+          e.stopPropagation();
+          if (!DP.diaryForm || DP.diaryForm.mode !== 'edit') return;
+          post('diaryDelete', { id: DP.diaryForm.id, day: DP.day });
+          closeDiaryForm();
+        };
+      })()
+    });
+    // ⚠️ 面板列很窄（约 86pt）：**不放时间输入框** ——
+    // 「标题 + 时间」并排会把两个框都挤成一条缝（实测截断成「21:3(」）。
+    // 时间改在设置 →「日记」的编辑框里填；这里只写标题 + 正文。
+    DP_diaryFormEl = h('div', { class: 'dpdiaryform' },
+      DP_diaryTitleEl,
+      DP_diaryTextEl,
+      h('div', { class: 'dpaddact' }, DP_diaryDeleteEl, cancel, save));
+    DP_diaryFormEl.style.display = 'none';
+    return DP_diaryFormEl;
+  }
+
+  function openDiaryForm(mode, entry) {
+    ensureDiaryForm();
+    DP.diaryForm = mode === 'edit'
+      ? { mode: 'edit', id: entry.id }
+      : { mode: 'add' };
+    DP_diaryTitleEl.value = entry ? (entry.title || '') : '';
+    DP_diaryTextEl.value = entry ? (entry.body || '') : '';
+    // 时间在面板里不可编辑，但**编辑时不能把原来的时间弄丢** ——
+    // 记住它，提交时原样带回去（真正改时间走设置里的编辑框）。
+    DP.diaryForm.time = entry ? (entry.time || '') : '';
+    // 编辑态才显示「删除」。
+    DP_diaryDeleteEl.style.display = mode === 'edit' ? '' : 'none';
+    DP_diaryFormEl.style.display = '';
+    renderPanel();
+    // 面板重绘之后表单元素还是同一批（稳定节点），直接聚焦。
+    setTimeout(function () {
+      try { DP_diaryTitleEl.focus(); } catch (e) {}
+    }, 0);
+  }
+
+  function closeDiaryForm() {
+    DP.diaryForm = null;
+    if (DP_diaryFormEl) DP_diaryFormEl.style.display = 'none';
+    renderPanel();
+  }
+
+  function submitDiary() {
+    if (!DP.diaryForm) return;
+    var title = (DP_diaryTitleEl.value || '').trim();
+    var body = (DP_diaryTextEl.value || '').trim();
+    if (!title && !body) { closeDiaryForm(); return; }
+    var payload = {
+      day: DP.day,
+      title: title,
+      body: body,
+      time: DP.diaryForm.time || ''
+    };
+    if (DP.diaryForm.mode === 'edit') {
+      payload.id = DP.diaryForm.id;
+      post('diaryUpdate', payload);
+    } else {
+      post('diaryAdd', payload);
+    }
+    closeDiaryForm();
+  }
+
+  /// 日记卡片（**稳定节点**：列表每次重建，表单永远不重建）。
+  function dpDiarySection(data, day) {
+    var items = (data && data.diary) || [];
+    if (DP_diaryDay !== day) {
+      // 换天了：把表单收起来（不然会把昨天的草稿写进今天）。
+      DP_diaryDay = day;
+      DP.diaryForm = null;
+    }
+    ensureDiaryForm();
+    if (!DP_diaryCard) {
+      DP_diaryList = h('div', { class: 'dpdiarylist' });
+      DP_diaryBody = h('div', { class: 'dpdiarybody' },
+        DP_diaryList,
+        h('div', {
+          class: 'dpadd dpdiaryadd',
+          onclick: function (e) {
+            e.stopPropagation();
+            if (DP.diaryForm) return;
+            openDiaryForm('add', null);
+          }
+        },
+          h('span', { class: 'plus', text: '＋' }),
+          h('span', { text: '写日记' })),
+        ensureDiaryForm());
+      DP_diaryCard = dpCard('diary', dpCardHead('📔', '日记'), DP_diaryBody, {
+        title: '日记',
+        nodeKey: 'diary'
+      });
+    }
+    // ---- 列表（每次重绘都重建，但**不碰表单**）----
+    DP_diaryList.textContent = '';
+    if (!items.length) {
+      DP_diaryList.appendChild(h('div', { class: 'dpempty', text: '今日没有日记' }));
+    } else {
+      items.forEach(function (d) {
+        var row = h('div', {
+          class: 'dpdiaryrow',
+          title: '点一下修改',
+          onclick: function (e) {
+            e.stopPropagation();
+            if (DP.diaryForm) return;
+            openDiaryForm('edit', d);
+          }
+        },
+          h('div', { class: 'dpdiaryhead' },
+            h('span', { class: 'dpdiaryt', text: d.time || '' }),
+            h('span', { class: 'dpdiaryname', text: d.title || '（未命名）' })),
+          d.body ? h('div', { class: 'dpdiarytxt', text: d.body }) : null);
+        DP_diaryList.appendChild(row);
+      });
+    }
+    // 表单显示状态跟着 DP.diaryForm 走（重绘后要重新应用）。
+    var open = !!DP.diaryForm;
+    DP_diaryFormEl.style.display = open ? '' : 'none';
+    var addRow = DP_diaryBody.querySelector('.dpdiaryadd');
+    if (addRow) addRow.style.display = open ? 'none' : '';
+    if (open) {
+      DP_diaryDeleteEl.style.display = DP.diaryForm.mode === 'edit' ? '' : 'none';
+    }
+    return [DP_diaryCard];
+  }
+
   function dpEventSection(data) {
     var events = (data && data.events) || [];
     var out = [];
@@ -2374,9 +2565,11 @@
     }
     var newCards = [];
     var todoCards = dpTodoSection(data, DP.day);
+    var diaryCards = dpDiarySection(data, DP.day);
     var eventCards = dpEventSection(data);
     var detailCards = dpFestivalSection(data);
     for (var ci = 0; ci < todoCards.length; ci++) newCards.push(todoCards[ci]);
+    for (var cd = 0; cd < diaryCards.length; cd++) newCards.push(diaryCards[cd]);
     for (var cj = 0; cj < eventCards.length; cj++) newCards.push(eventCards[cj]);
     for (var ck = 0; ck < detailCards.length; ck++) newCards.push(detailCards[ck]);
     syncCards(cards, newCards);

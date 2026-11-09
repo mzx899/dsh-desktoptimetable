@@ -9,6 +9,9 @@ import AppKit
 enum SettingsSection: String, CaseIterable {
     case appearance
     case timetable
+    /// 日记（2026-11-10 新增）：日期覆盖层里「待办 / 日程」之外的第三块内容，
+    /// 设置里单独一个板块专门管理（列表 / 新建 / 修改 / 删除）。
+    case diary
     case reminder
     case system
 
@@ -17,6 +20,7 @@ enum SettingsSection: String, CaseIterable {
         switch self {
         case .appearance: return "外观"
         case .timetable:  return "课表"
+        case .diary:      return "日记"
         case .reminder:   return "提醒"
         case .system:     return "系统"
         }
@@ -30,6 +34,7 @@ enum SettingsSection: String, CaseIterable {
         switch self {
         case .appearance: return "paintbrush"
         case .timetable:  return "calendar"
+        case .diary:      return "book.closed"
         case .reminder:   return "bell"
         case .system:     return "gearshape"
         }
@@ -40,6 +45,7 @@ enum SettingsSection: String, CaseIterable {
         switch self {
         case .appearance: return "外观"
         case .timetable:  return "课表"
+        case .diary:      return "日记"
         case .reminder:   return "提醒"
         case .system:     return "系统"
         }

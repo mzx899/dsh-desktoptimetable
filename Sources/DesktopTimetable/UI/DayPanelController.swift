@@ -158,6 +158,8 @@ final class DayPanelController {
 
     /// 缓存的当天内容（覆盖层要显示）。
     private var content = DayPanelContent()
+    /// 日记存储（JSON 小文件，**不碰** EventKit —— 日记是本 app 自己的数据）。
+    private let diaryStore = DiaryStore()
 
     /// 上一次真正推给网页的状态指纹（`pushState` 用，避免重复推送）。
     private var lastPushedSignature: String?
@@ -536,8 +538,78 @@ final class DayPanelController {
             updateTodo(payload: dict)
         case "todoDelete":
             deleteTodo(payload: dict)
+        case "diaryAdd":
+            addDiary(payload: dict, day: day)
+        case "diaryUpdate":
+            updateDiary(payload: dict)
+        case "diaryDelete":
+            deleteDiary(payload: dict)
         default:
             break
+        }
+    }
+
+    // MARK: - 日记（本地 JSON，不碰提醒事项）
+
+    /// 重新读当前这一天的日记并推状态。
+    private func refreshDiary(day: Int) {
+        guard let date = dayDate(day) else { return }
+        let entries = diaryStore.entries(on: DiaryStore.dateKey(date)).map {
+            DayPanelDiary(id: $0.id, title: $0.title, body: $0.body, time: $0.time)
+        }
+        // ⚠️ 只有**正在显示的就是这一天**时才改 `content` 并推状态（2026-11-10 修）。
+        //
+        // 之前不判断就写：网页发来的 `day` 和当前打开的那天不一致时
+        //（比如面板还停在第 3 天、用户/自检给第 4 天加日记），会把第 4 天的日记
+        // 写进第 3 天的 content 再推出去 → 网页拿 day 一对不上就退回按天缓存
+        // → 刚写的那篇**在面板里不出现**（实测 rows = 0，但 diary.json 里已经有了）。
+        guard currentDay == nil || currentDay == day else { return }
+        content.diary = entries
+        pushState()
+    }
+
+    /// 新增一条（标题 / 正文都空就当没写，不落盘）。
+    private func addDiary(payload: [String: Any]?, day: Int) {
+        let title = ((payload?["title"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = ((payload?["body"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let time = (payload?["time"] as? String) ?? ""
+        let targetDay = day != 0 ? day : (currentDay ?? 0)
+        guard targetDay != 0, let date = dayDate(targetDay) else { return }
+        guard !title.isEmpty || !body.isEmpty else { return }
+        do {
+            try diaryStore.add(date: DiaryStore.dateKey(date),
+                               title: title, body: body, time: time)
+            refreshDiary(day: targetDay)
+        } catch {
+            DiagLog.info("写日记失败：\(error)")
+        }
+    }
+
+    private func updateDiary(payload: [String: Any]?) {
+        guard let id = payload?["id"] as? String, !id.isEmpty else { return }
+        let title = ((payload?["title"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = ((payload?["body"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let time = (payload?["time"] as? String) ?? ""
+        guard !title.isEmpty || !body.isEmpty else { return }
+        do {
+            try diaryStore.update(id: id, title: title, body: body, time: time)
+            if let day = currentDay { refreshDiary(day: day) }
+        } catch {
+            DiagLog.info("改日记失败：\(error)")
+        }
+    }
+
+    private func deleteDiary(payload: [String: Any]?) {
+        guard let id = payload?["id"] as? String, !id.isEmpty else { return }
+        do {
+            try diaryStore.delete(id: id)
+            if let day = currentDay { refreshDiary(day: day) }
+        } catch {
+            DiagLog.info("删日记失败：\(error)")
         }
     }
 
@@ -1150,6 +1222,10 @@ final class DayPanelController {
         // 算完存进 `festivalByDay`，push 时一起给网页。
         refreshFestivalCache()
         content.festival = festivalByDay[day] ?? festivalProvider.festival(on: date)
+        // 日记是**本地 JSON**，同步读就行（不经过 EventKit、没有授权问题）。
+        content.diary = diaryStore.entries(on: DiaryStore.dateKey(date)).map {
+            DayPanelDiary(id: $0.id, title: $0.title, body: $0.body, time: $0.time)
+        }
 
         if resetImmediately {
             // ⚠️ 换天时**必须清空**上一天的 todos / events ——
@@ -1157,6 +1233,8 @@ final class DayPanelController {
             // 待办和日程，网页会把它显示出来（显示成今天有昨天的待办）。
             content.todos = []
             content.events = []
+            // 日记同样要清 —— 否则换天时会短暂显示上一天的日记。
+            content.diary = []
             // 天气也要清 —— 否则新的一天会暂时显示**昨天**的天气。
             content.festival.weather = nil
             // ⚠️ 这是**中间态** —— 待办 / 日程还没查。

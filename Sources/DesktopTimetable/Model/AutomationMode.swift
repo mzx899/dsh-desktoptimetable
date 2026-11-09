@@ -41,6 +41,7 @@ enum AutomationMode {
         "--verify-reminder-plan",
         "--verify-settings-card",
         "--verify-data-buttons",
+        "--verify-diary",
         "--shot-import-diff",
         "--verify-period-save",
         "--verify-lead-custom",

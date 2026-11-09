@@ -38,6 +38,26 @@ struct DayPanelTodo: Equatable {
     var calendarIdentifier: String
 }
 
+/// 「日期覆盖层」里的一条**日记**。
+///
+/// 日记**不属于**提醒事项 / 系统日历：它存在本 app 自己的
+/// `<数据目录>/diary.json` 里（见 `Model/DiaryStore.swift`），
+/// 删除 / 修改只影响这份文件，不会碰用户的提醒事项。
+struct DayPanelDiary: Equatable {
+    /// 稳定标识（网页发 `diaryUpdate` / `diaryDelete` 时带回来）。
+    var id: String
+    /// 标题（可以空 → 列表里显示「（未命名）」）。
+    var title: String
+    /// 正文（可多行）。
+    var body: String
+    /// `HH:mm`；空串 = 没写具体时间。
+    var time: String
+
+    var jsonObject: [String: Any] {
+        ["id": id, "title": title, "body": body, "time": time]
+    }
+}
+
 /// 「日期覆盖层」里的**一条日程**（来自系统日历）。
 struct DayPanelEvent: Equatable {
     var title: String
@@ -68,6 +88,8 @@ struct DayPanelContent: Equatable {
     var todos: [DayPanelTodo] = []
     /// 日程。
     var events: [DayPanelEvent] = []
+    /// 日记（**第三块内容**，和待办 / 日程并列；存在 app 自己的 diary.json 里）。
+    var diary: [DayPanelDiary] = []
     /// 节日 / 节气信息（由农历模块提供）。
     var festival: DayPanelFestival = DayPanelFestival()
     /// 待办 / 日程是否**已经向 EventKit 查完并合并**（2026-11 加）。
@@ -178,6 +200,7 @@ extension DayPanelContent {
                     "calendarIdentifier": event.calendarIdentifier,
                 ] as [String: Any]
             },
+            "diary": diary.map(\.jsonObject),
             "festival": DayPanelContent.festivalJSON(festival),
             // 待办 / 日程是否已查完（网页判断「要不要补发请求」用）。
             "ready": ready,

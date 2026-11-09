@@ -530,6 +530,18 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
     /// 预览里当前选中的课表（还没应用）。
     private var selectedTimetableID: String?
 
+    // MARK: - 日记板块状态（2026-11-10）
+
+    /// 日记存储（和日期覆盖层共用同一份 `diary.json`）。
+    private let diaryStore = DiaryStore()
+    private var diaryEntries: [DiaryEntry] = []
+    private var selectedDiaryID: String?
+    private var diarySummaryLabel: NSTextField!
+    private var diaryListStack: NSStackView?
+    private var diaryScrollView: NSScrollView?
+    private var diaryEditButton: NSButton?
+    private var diaryDeleteButton: NSButton?
+
     /// 课表集合变了（新建 / 重命名 / 删除 / 切换）—— 上层要立刻刷新桌面卡片。
     var onTimetablesChanged: (() -> Void)?
 
@@ -1865,6 +1877,10 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
         periodCard.content.addArrangedSubview(periodEditor)
         stack.addArrangedSubview(periodCard)
         periodCard.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        // ---- 板块边界：课表 → 日记（2026-11-10 新增）----
+        stack = makeSectionStack(.diary, in: doc)
+        buildDiarySection(into: stack)
 
         // ---- 板块边界：课表 → 提醒 ----
         stack = makeSectionStack(.reminder, in: doc)
@@ -4194,6 +4210,161 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
     }
 
     /// 带符号的小按钮（符号在文字前面）。
+    // MARK: - 日记板块自检探针
+
+    /// 只读：日记板块当前显示了几行、摘要写了什么、选中的是哪一条。
+    func probeDiarySection() -> (count: Int, summary: String, selected: String?) {
+        (diaryListStack?.arrangedSubviews.count ?? 0,
+         diarySummaryLabel?.stringValue ?? "",
+         selectedDiaryID)
+    }
+
+    /// 自检用：选中某一行（走的是和点击一样的路径）。
+    func testSelectDiary(id: String) {
+        selectedDiaryID = id
+        refreshDiaryList()
+    }
+
+    // MARK: - 日记板块（2026-11-10 新增）
+
+    /// 「日记」板块：列表 + 新建 / 编辑 / 删除。
+    ///
+    /// 数据源是 `DiaryStore`（`<数据目录>/diary.json`），和日期覆盖层用的是**同一份文件** ——
+    /// 在设置里改完，桌面上的覆盖层下一次打开 / 刷新就跟着变。
+    private func buildDiarySection(into stack: NSStackView) {
+        let card = SettingsCard(title: "日记")
+
+        diarySummaryLabel = makeLabel("", size: 11.5, color: NSColor.white.withAlphaComponent(0.55))
+        diarySummaryLabel.maximumNumberOfLines = 2
+        diarySummaryLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        // 列表：可滚动的一列行（行 = 日期 · 时间 · 标题）。
+        let listStack = NSStackView()
+        listStack.orientation = .vertical
+        listStack.alignment = .leading
+        listStack.spacing = 4
+        listStack.translatesAutoresizingMaskIntoConstraints = false
+        diaryListStack = listStack
+
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        let doc = FlippedStackDocument()
+        doc.translatesAutoresizingMaskIntoConstraints = false
+        doc.addSubview(listStack)
+        scroll.documentView = doc
+        NSLayoutConstraint.activate([
+            doc.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            doc.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            doc.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            listStack.leadingAnchor.constraint(equalTo: doc.leadingAnchor),
+            listStack.trailingAnchor.constraint(equalTo: doc.trailingAnchor),
+            listStack.topAnchor.constraint(equalTo: doc.topAnchor),
+            listStack.bottomAnchor.constraint(equalTo: doc.bottomAnchor),
+            scroll.heightAnchor.constraint(equalToConstant: 176),
+        ])
+        diaryScrollView = scroll
+
+        let newBtn = makeIconButton("新建", symbol: "plus", action: #selector(newDiaryEntry))
+        let editBtn = makeIconButton("编辑", symbol: "pencil", action: #selector(editDiaryEntry))
+        let delBtn = makeIconButton("删除", symbol: "trash", action: #selector(deleteDiaryEntry))
+        diaryEditButton = editBtn
+        diaryDeleteButton = delBtn
+        let buttons = NSStackView(views: [newBtn, editBtn, delBtn])
+        buttons.orientation = .horizontal
+        buttons.spacing = 8
+        buttons.alignment = .leading
+        buttons.translatesAutoresizingMaskIntoConstraints = false
+
+        card.content.addArrangedSubview(diarySummaryLabel)
+        card.content.addArrangedSubview(scroll)
+        card.content.addArrangedSubview(buttons)
+        stack.addArrangedSubview(card)
+        card.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        refreshDiaryList()
+    }
+
+    /// 重新读文件并重建列表（新建 / 编辑 / 删除之后都走这里）。
+    func refreshDiaryList() {
+        guard let diaryListStack else { return }
+        diaryEntries = diaryStore.all()
+        if let selected = selectedDiaryID,
+           !diaryEntries.contains(where: { $0.id == selected }) {
+            selectedDiaryID = nil
+        }
+        diarySummaryLabel?.stringValue = diaryEntries.isEmpty
+            ? "还没有日记。日期覆盖层里点「＋ 写日记」，或者这里点「新建」。"
+            : "共 \(diaryEntries.count) 篇。列表按日期倒序；点一行选中，再点「编辑」或「删除」。"
+        for v in diaryListStack.arrangedSubviews {
+            diaryListStack.removeArrangedSubview(v)
+            v.removeFromSuperview()
+        }
+        for entry in diaryEntries {
+            let row = DiaryRowView(entry: entry, selected: entry.id == selectedDiaryID)
+            row.onSelect = { [weak self] in
+                guard let self else { return }
+                self.selectedDiaryID = entry.id
+                self.refreshDiaryList()
+            }
+            row.translatesAutoresizingMaskIntoConstraints = false
+            diaryListStack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: diaryListStack.widthAnchor).isActive = true
+            row.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        }
+        diaryEditButton?.isEnabled = selectedDiaryID != nil
+        diaryDeleteButton?.isEnabled = selectedDiaryID != nil
+    }
+
+    @objc private func newDiaryEntry() {
+        guard let result = DiaryEditorDialog.run(title: "写日记", entry: nil, confirmTitle: "保存") else { return }
+        let date = DiaryStore.dateKey(Date())
+        do {
+            let entry = try diaryStore.add(date: date, title: result.title,
+                                           body: result.body, time: result.time)
+            selectedDiaryID = entry.id
+            refreshDiaryList()
+        } catch {
+            statusLabel.stringValue = "写日记失败：\(error.localizedDescription)"
+        }
+    }
+
+    @objc private func editDiaryEntry() {
+        guard let id = selectedDiaryID,
+              let entry = diaryEntries.first(where: { $0.id == id }) else { return }
+        guard let result = DiaryEditorDialog.run(title: "修改日记", entry: entry,
+                                                 confirmTitle: "保存") else { return }
+        do {
+            try diaryStore.update(id: id, title: result.title,
+                                  body: result.body, time: result.time)
+            refreshDiaryList()
+        } catch {
+            statusLabel.stringValue = "保存日记失败：\(error.localizedDescription)"
+        }
+    }
+
+    @objc private func deleteDiaryEntry() {
+        guard let id = selectedDiaryID,
+              let entry = diaryEntries.first(where: { $0.id == id }) else { return }
+        let name = entry.title.isEmpty ? "（未命名）" : entry.title
+        let outcome = AlertDialogController.show(.init(
+            severity: .destructive,
+            title: "删除这篇日记？",
+            message: "\(entry.date)　\(name)",
+            confirmTitle: "删除"))
+        guard case .confirmed = outcome else { return }
+        do {
+            try diaryStore.delete(id: id)
+            selectedDiaryID = nil
+            refreshDiaryList()
+        } catch {
+            statusLabel.stringValue = "删除日记失败：\(error.localizedDescription)"
+        }
+    }
+
     private func makeIconButton(_ title: String, symbol: String, action: Selector) -> NSButton {
         let b = NSButton(title: title, target: self, action: action)
         b.bezelStyle = .rounded

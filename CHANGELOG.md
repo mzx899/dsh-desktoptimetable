@@ -1,5 +1,68 @@
 # 更新日志 · Changelog
 
+## [1.5.0] - 2026-11-09
+
+### 新增「日记」：日期覆盖层里的第三块内容 + 设置里的第 5 个板块
+
+用户原话（2026-11-09 晚）：
+
+> 「这一版本先实现日记功能。日记功能也在日历那一栏里面，只是它和日历提醒事项是单独的
+> 三部分。日记是单独的，呈现形式与提醒事项差不多，就是也具有删除，然后包括修改、新增
+> 的功能，然后日记在设置里面单独开一个，就是现在不是课表设置有 4 个嘛，然后有了日记之后
+> 就变成 5 个。然后日记的那个板块里面就专门用来管理日记」
+
+#### 做了什么
+
+**数据层**（`Model/DiaryStore.swift`，新文件）
+
+- `DiaryEntry`：id / date（`yyyy-MM-dd`）/ title / body / time（`HH:mm`）/ updatedAt；
+- `DiaryStore`：读写 `<数据目录>/diary.json`（临时目录由 `DT_DATA_DIR` 控制），
+  按天查、增 / 改 / 删 / 清空一天；**原子写**（临时文件 + 原子替换）；
+- 文件坏了**不吞数据**：解析失败先备份成 `diary.corrupt-<时间戳>.json`，再按空处理。
+
+**日期覆盖层**（`Resources/Timetable.js` + `DayPanelItem.swift` + `DayPanelController.swift`）
+
+- `DayPanelContent` 增加 `diary: [DayPanelDiary]`，随状态一起推给网页；
+- 覆盖层面板里**待办 → 日记 → 日程 → 今日详情**四张卡；
+- 日记卡：琥珀色左侧竖条，列表显示「时间 + 标题 + 正文前两行」；
+  「＋ 写日记」展开表单（标题 + 正文 + 删除 / 取消 / 保存）；
+  点某一条进入**编辑态**（同一个表单，多一个「删除」）；
+- 表单是**稳定节点**（只切 `display`、不重建 input）—— 和「添加待办」同一个教训；
+- 原生 intent：`diaryAdd` / `diaryUpdate` / `diaryDelete`（`AppDelegate` 里 `diary` 前缀
+  交给 `DayPanelController`）；空标题 + 空正文不落盘。
+
+**设置面板**（`SettingsHomeScreen.swift` + `SettingsWindowController.swift` + `UI/DiaryEditorDialog.swift`）
+
+- `SettingsSection` 增加 `.diary`（图标 `book.closed`），首页从 4 个板块变 **5 个**
+  （外观 / 课表 / **日记** / 提醒 / 系统）；
+- 「日记」板块 = 列表（日期 · 时间 · 标题，点一行选中）+ 新建 / 编辑 / 删除；
+  新建 / 编辑用新的 `DiaryEditorDialog`（标题 + 时间 + 多行正文），删除走统一的危险确认框；
+- 和日期覆盖层读的是**同一份 diary.json**。
+
+#### 踩到的坑（都写进注释了）
+
+- `refreshDiary(day:)` 以前不判断「这一天是不是正在显示的那天」→ 给别的日子写日记时，
+  会把那一天的内容写进当前 content 再推出 → 网页 `panelDataFor` 发现 `day` 对不上就
+  退回按天缓存 → **面板里看不到刚写的那篇**（`diary.json` 里其实已经有了）。
+  现在只在 `day == currentDay` 时才改 content + 推状态。
+- 面板列只有约 86pt：表单里**不放时间输入框**（标题 + 时间并排会把两个框都挤成一条缝，
+  实测时间被截成「21:3(」）。时间在设置里的编辑框填。
+
+#### 自检
+
+- **新增 `--verify-diary`**：面板里 `diaryAdd` / `diaryUpdate` / `diaryDelete` 真的写文件、
+  换天看不到别的日子的日记、设置板块列表读同一份文件、空内容不落盘 → ✅ 通过；
+- `--verify-day-panel-click` 增加**真实点击**用例（点「＋ 写日记」→ 填内容 → 点保存 →
+  列表里出现那一行），走完整链路 → ✅ 通过；
+- `make test`：**2078 项断言全过**（新增日记存储 / 坏文件 / JSON 断言，更新板块数相关断言）；
+- 出图：`docs/archive/shots-1.5.0/`（面板列表 / 面板表单 / 设置板块）。
+
+### 版本
+
+**1.5.0** —— 次版本，**bundle id 不变**（仍为 `com.desktoptimetable.app.v120`）：
+日历 / 提醒事项的授权、登录项、通知身份、数据目录全部延续，升级不用重新授权。
+构建已归档到 `版本迭代/DesktopTimetable-1.5.0.app`。
+
 ## [1.4.8] - 2026-11-09
 
 ### 弹窗文案精简：导入决策不再把同一段说明写两遍；删除整门课程的按钮改叫「删除」

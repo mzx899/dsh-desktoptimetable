@@ -3000,9 +3000,9 @@ suite("SettingsWindowController · Esc 归属") {
 // MARK: - 设置面板的两级结构（板块首页 → 分类设置页）
 
 suite("SettingsSection · 板块定义") {
-    // 四个板块，顺序固定（首页按钮从左到右就是这个顺序）。
-    expectEqual(SettingsSection.allCases.map(\.title), ["外观", "课表", "提醒", "系统"],
-                "四个板块的名字和顺序")
+    // 五个板块（2026-11-10 加了「日记」），顺序固定（首页按钮从左到右就是这个顺序）。
+    expectEqual(SettingsSection.allCases.map(\.title), ["外观", "课表", "日记", "提醒", "系统"],
+                "五个板块的名字和顺序")
     // 每个板块都要有图标。
     for section in SettingsSection.allCases {
         expect(!section.symbolName.isEmpty, "板块「\(section.title)」必须有图标名")
@@ -3010,7 +3010,7 @@ suite("SettingsSection · 板块定义") {
         expect(section.symbolName.allSatisfy { $0.isLetter || $0 == "." },
                "板块「\(section.title)」的图标名不是 SF Symbol：\(section.symbolName)")
     }
-    // 图标不能重复（四个板块要能一眼分清）。
+    // 图标不能重复（五个板块要能一眼分清）。
     expectEqual(Set(SettingsSection.allCases.map(\.symbolName)).count,
                 SettingsSection.allCases.count, "四个板块的图标不重复")
     // rawValue 要能原样往返（首页按钮靠它认领板块）。
@@ -3022,8 +3022,8 @@ suite("SettingsSection · 板块定义") {
 
 suite("SettingsHomeScreen · 首页板块按钮") {
     let home = SettingsHomeScreen()
-    // 4 个按钮，名字就是板块名。
-    expectEqual(home.sectionTitles, ["外观", "课表", "提醒", "系统"], "首页有 4 个板块按钮")
+    // 5 个按钮，名字就是板块名（「日记」是 2026-11-10 加的）。
+    expectEqual(home.sectionTitles, ["外观", "课表", "日记", "提醒", "系统"], "首页有 5 个板块按钮")
     expect(home.sectionTitlesMatch, "首页板块名字和 SettingsSection 一致")
     // 图标必须是**纯色**（template）—— 禁止 emoji / 彩色图标。
     expect(home.allIconsAreMonochrome, "首页图标全部是纯色（template）")
@@ -7306,4 +7306,82 @@ if failures == 0 {
 } else {
     print("✗ \(failures) 项失败 / \(checks) 项断言")
     exit(1)
+}
+
+// MARK: - 日记（2026-11-10）
+
+suite("日记 · 存储（增 / 改 / 删 / 排序）") {
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("dt-diary-test-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let store = DiaryStore(directory: dir)
+
+    // 空目录：不崩、返回空。
+    expectEqual(store.all().count, 0, "空目录应该没有任何日记")
+
+    // 同一天按时间升序；没写时间的排最后。
+    let late = try! store.add(date: "2026-11-11", title: "晚", body: "b", time: "20:00")
+    let early = try! store.add(date: "2026-11-11", title: "早", body: "a", time: "08:00")
+    let noTime = try! store.add(date: "2026-11-11", title: "没时间", body: "c", time: "")
+    let other = try! store.add(date: "2026-11-12", title: "第二天", body: "d", time: "09:00")
+
+    let day1 = store.entries(on: "2026-11-11")
+    expectEqual(day1.count, 3, "同一天应该读到 3 条")
+    expectEqual(day1.map(\.title), ["早", "晚", "没时间"], "同一天按时间升序，没时间的排最后")
+    expectEqual(store.entries(on: "2026-11-10").count, 0, "别的日子没有日记")
+
+    // all() 日期倒序：11-12 排在 11-11 前面。
+    expectEqual(store.all().first?.id, other.id, "all() 按日期倒序")
+
+    // 改：标题 / 正文 / 时间都变了，id 不变。
+    _ = try! store.update(id: early.id, title: "早（改）", body: "aa", time: "07:30")
+    let updated = store.entries(on: "2026-11-11").first
+    expectEqual(updated?.title, "早（改）", "改标题要落盘")
+    expectEqual(updated?.time, "07:30", "改时间要落盘")
+    expectEqual(updated?.id, early.id, "改完 id 不能变")
+
+    // 删：只删这一条。
+    _ = try! store.delete(id: late.id)
+    expectEqual(store.entries(on: "2026-11-11").count, 2, "删一条之后剩 2 条")
+    expect(!store.entries(on: "2026-11-11").contains { $0.id == late.id }, "删掉的那条不该还在")
+
+    // 删不存在的：返回 false、不崩。
+    expectEqual(try! store.delete(id: "不存在"), false, "删不存在的 id 应该返回 false")
+
+    // 换一个 store 实例读同一份文件（证明真的落盘了）。
+    let reread = DiaryStore(directory: dir)
+    expectEqual(reread.entries(on: "2026-11-11").count, 2, "重新打开文件应该还能读到 2 条")
+    expectEqual(reread.count(), 3, "全量 3 条（两天）")
+}
+
+suite("日记 · 坏文件不吞数据") {
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("dt-diary-bad-\(UUID().uuidString)")
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let file = dir.appendingPathComponent("diary.json")
+    try! "{ 这不是 JSON".data(using: .utf8)!.write(to: file)
+
+    let store = DiaryStore(directory: dir)
+    expectEqual(store.all().count, 0, "坏文件按空处理（不能崩）")
+
+    // 写一次之后，坏文件应该被备份出来，而不是被静默覆盖。
+    _ = try! store.add(date: "2026-11-11", title: "新的", body: "", time: "")
+    let backups = (try? FileManager.default.contentsOfDirectory(atPath: dir.path))?
+        .filter { $0.hasPrefix("diary.corrupt-") } ?? []
+    expectEqual(backups.count, 1, "坏文件要备份成 diary.corrupt-*.json")
+}
+
+suite("日记 · 日期键与内容 JSON") {
+    // 日期键只用一种格式，避免时区 / locale 漂移。
+    expectEqual(DiaryStore.dateKey(day(2026, 11, 11)), "2026-11-11", "日期键格式")
+
+    var content = DayPanelContent(day: 3)
+    content.diary = [DayPanelDiary(id: "x", title: "标题", body: "正文", time: "20:00")]
+    let json = content.jsonObject
+    let diary = json["diary"] as? [[String: Any]] ?? []
+    expectEqual(diary.count, 1, "jsonObject 要带 diary")
+    expectEqual(diary.first?["title"] as? String, "标题", "jsonObject 的标题")
+    expectEqual(diary.first?["time"] as? String, "20:00", "jsonObject 的时间")
 }

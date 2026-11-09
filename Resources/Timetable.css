@@ -1761,3 +1761,119 @@ input.dptimepart:focus {
   background: rgba(255, 255, 255, 0.16);
   color: rgba(238, 241, 247, 1);
 }
+
+/* ==========================================================================
+   日记（2026-11-10 新增）
+
+   日期覆盖层里的**第三块**内容（待办 = 提醒事项 / 日程 = 系统日历 /
+   日记 = app 自己的 diary.json）。列很窄（内容宽约 86.6pt），所以：
+     · 列表每行两行文字：`时间 + 标题` / 正文摘要（最多 2 行）；
+     · 表单是三行：标题 + 时间（同一行）/ 正文 textarea / 按钮。
+   ========================================================================== */
+/* 日记卡片的左侧竖条：暖琥珀（和待办的青蓝、日程的粉蓝区分开）。 */
+.dpcard.diary::after { background: linear-gradient(to bottom, #f5c26b, #e8915a); }
+
+.dpdiarybody { display: flex; flex-direction: column; gap: 6px; width: 100%; min-width: 0; }
+.dpdiarylist { display: flex; flex-direction: column; gap: 6px; width: 100%; min-width: 0; }
+
+.dpdiaryrow {
+  padding: 5px 7px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+  min-width: 0;
+}
+.dpdiaryrow:hover { background: rgba(255, 255, 255, 0.09); border-color: rgba(245, 194, 107, 0.35); }
+.dpdiaryhead { display: flex; align-items: baseline; gap: 5px; min-width: 0; }
+.dpdiaryt {
+  font-size: 10px;
+  color: rgba(245, 194, 107, 0.85);
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+.dpdiaryname {
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.dpdiarytxt {
+  margin-top: 2px;
+  font-size: 10px;
+  line-height: 1.45;
+  color: rgba(238, 241, 247, 0.62);
+  white-space: pre-wrap;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* 「＋ 写日记」：跟「＋ 添加待办」同一套幽灵行样式。 */
+.dpdiaryadd { width: 100%; box-sizing: border-box; }
+
+/* 表单：稳定节点，只切 display。 */
+.dpdiaryform { display: flex; flex-direction: column; gap: 5px; width: 100%; min-width: 0; }
+/* 标题 + 时间并排：标题吃满剩余宽度，时间固定 40pt。 */
+.dpdiaryinputs { display: flex; align-items: center; gap: 5px; width: 100%; min-width: 0; }
+.dpdiaryform .dpdiary-title,
+.dpdiaryform .dpdiary-time {
+  box-sizing: border-box;
+  min-width: 0;
+  background: rgba(245, 194, 107, 0.10);
+  border: 1px solid rgba(245, 194, 107, 0.38);
+  border-radius: 8px;
+  padding: 4px 7px;
+  outline: none;
+  color: #fff;
+  font: inherit;
+  font-size: 10.5px;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.dpdiaryform .dpdiary-title { flex: 1 1 0; }
+.dpdiaryform .dpdiary-time { flex: 0 0 40px; text-align: center; }
+.dpdiaryform .dpdiary-title:focus,
+.dpdiaryform .dpdiary-time:focus {
+  border-color: rgba(245, 194, 107, 0.85);
+  background: rgba(245, 194, 107, 0.16);
+}
+.dpdiaryform {
+  /* 第一行（标题 + 时间）用 flex 排 —— 这里靠一个包装行实现不了，
+     所以让标题和时间的宽度相加正好铺满。 */
+}
+.dpdiaryform > input { margin-bottom: 0; }
+.dpdiaryform .dpdiary-text {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 64px;
+  resize: none;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  padding: 5px 7px;
+  outline: none;
+  color: #fff;
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 1.45;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.dpdiaryform .dpdiary-text:focus {
+  border-color: rgba(245, 194, 107, 0.7);
+  background: rgba(255, 255, 255, 0.08);
+}
+.dpdiaryform .dpdiary-text::placeholder,
+.dpdiaryform input::placeholder { color: rgba(238, 241, 247, 0.32); }
+
+/* 表单按钮行：删除在左、取消 / 保存在右。 */
+.dpdiaryform .dpaddact { display: flex; align-items: center; gap: 6px; justify-content: flex-end; width: 100%; }
+.dpdiaryform .dpddel { margin-right: auto; color: #ef5f5b; cursor: pointer; font-size: 10.5px; }
+.dpdiaryform .dpddel:hover { color: #ff7b77; }
