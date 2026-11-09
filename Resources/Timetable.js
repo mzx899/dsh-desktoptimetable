@@ -2134,7 +2134,6 @@
   var DP_diaryTitleEl = null;
   var DP_diaryTimeEl = null;
   var DP_diaryTextEl = null;
-  var DP_diaryDeleteEl = null;
   var DP_diaryDay = null;
 
   function diaryTimeText(v) {
@@ -2176,24 +2175,15 @@
       class: 'dpcancel', text: '取消',
       onclick: function (e) { e.stopPropagation(); closeDiaryForm(); }
     });
-    DP_diaryDeleteEl = h('span', {
-      class: 'dpddel', text: '删除',
-      onclick: (function () {
-        return function (e) {
-          e.stopPropagation();
-          if (!DP.diaryForm || DP.diaryForm.mode !== 'edit') return;
-          post('diaryDelete', { id: DP.diaryForm.id, day: DP.day });
-          closeDiaryForm();
-        };
-      })()
-    });
     // ⚠️ 面板列很窄（约 86pt）：**不放时间输入框** ——
     // 「标题 + 时间」并排会把两个框都挤成一条缝（实测截断成「21:3(」）。
     // 时间改在设置 →「日记」的编辑框里填；这里只写标题 + 正文。
+    // ⚠️ 表单里**不放「删除」**（2026-11-10 用户要求）：列只有 ~86pt，
+    // 「删除」被挤到卡片外面。删除改走**右键菜单**（和待办一致）。
     DP_diaryFormEl = h('div', { class: 'dpdiaryform' },
       DP_diaryTitleEl,
       DP_diaryTextEl,
-      h('div', { class: 'dpaddact' }, DP_diaryDeleteEl, cancel, save));
+      h('div', { class: 'dpaddact' }, cancel, save));
     DP_diaryFormEl.style.display = 'none';
     return DP_diaryFormEl;
   }
@@ -2208,8 +2198,6 @@
     // 时间在面板里不可编辑，但**编辑时不能把原来的时间弄丢** ——
     // 记住它，提交时原样带回去（真正改时间走设置里的编辑框）。
     DP.diaryForm.time = entry ? (entry.time || '') : '';
-    // 编辑态才显示「删除」。
-    DP_diaryDeleteEl.style.display = mode === 'edit' ? '' : 'none';
     DP_diaryFormEl.style.display = '';
     renderPanel();
     // 面板重绘之后表单元素还是同一批（稳定节点），直接聚焦。
@@ -2322,7 +2310,8 @@
       items.forEach(function (d) {
         var row = h('div', {
           class: 'dpdiaryrow',
-          title: '点一下修改',
+          'data-diary-id': d.id,
+          title: '点一下修改 · 右键可删除',
           onclick: function (e) {
             e.stopPropagation();
             if (DP.diaryForm) return;
@@ -2341,9 +2330,6 @@
     DP_diaryFormEl.style.display = open ? '' : 'none';
     var addRow = DP_diaryBody.querySelector('.dpdiaryadd');
     if (addRow) addRow.style.display = open ? 'none' : '';
-    if (open) {
-      DP_diaryDeleteEl.style.display = DP.diaryForm.mode === 'edit' ? '' : 'none';
-    }
     return [DP_diaryCard];
   }
 
@@ -2563,9 +2549,18 @@
       pendingEditSig = [DP.pendingEdit.key, DP.pendingEdit.identifier,
                         DP.pendingEdit.title, DP.pendingEdit.time].join('|');
     }
+    // ⚠️ **日记表单的开 / 关 / 换条目也必须进指纹**（2026-11-10 修）：
+    // 以前指纹里没有它 → 点「＋ 写日记」时「内容没变」直接早退，
+    // 于是 `dpDiarySection` 根本没跑，「＋ 写日记」那一行还挂在那儿
+    //（用户：「点了写日记之后怎么还有一个加号写日记」）。
+    var diaryFormSig = DP.diaryForm
+      ? (DP.diaryForm.mode + ':' + (DP.diaryForm.id || ''))
+      : 'none';
+    var diaryPendingSig = (DP.diaryPending || []).length;
     var renderKey = JSON.stringify([
       DP.day, data, pendingSig, DP.adding, DP.addError,
-      DP.editingTodoKey, DP.editError, pendingEditSig
+      DP.editingTodoKey, DP.editError, pendingEditSig,
+      diaryFormSig, diaryPendingSig
     ]);
     if (renderKey === DP.renderKey && body.firstChild) {
       // 内容一样 → 位置 / 滚动 / 焦点都不用动。
@@ -3391,6 +3386,7 @@
       var flags = dayFlagsOf(d);
       var hasTodo = !allWeeks && !!(flags && flags.todo);
       var hasEvent = !allWeeks && !!(flags && flags.event);
+      var hasDiary = !allWeeks && !!(flags && flags.diary);
 
       var mid = cell.querySelector('.hmid');
       var row = cell.querySelector('.hdrow');
@@ -3406,6 +3402,12 @@
       }
       if (hasTodo) todoDot.classList.remove('off');
       else todoDot.classList.add('off');
+
+      var diaryDot = mid.querySelector('.dot.diary');
+      if (diaryDot) {
+        if (hasDiary) diaryDot.classList.remove('off');
+        else diaryDot.classList.add('off');
+      }
 
       var eventDot = mid.querySelector('.dot.event');
       if (!eventDot) {
@@ -4039,6 +4041,7 @@
       var allWeeks = isAllWeeksMode();
       var hasTodo = !allWeeks && !!(flags && flags.todo);
       var hasEvent = !allWeeks && !!(flags && flags.event);
+      var hasDiary = !allWeeks && !!(flags && flags.diary);
       // ⚠️ **红点挪到「周几」文字的左边**（2026-11 改）。
       //
       // 以前红点 / 橙点是绝对定位在**格子最左缘**的（`.hslot`），
@@ -4073,9 +4076,17 @@
             // 现在和红点一样：每列都渲染，不是今天就 `.off` 占位，
             // 左右各一个点，文字永远在正中。
             h('span', { class: 'dot todo' + (hasTodo ? '' : ' off') }),
-            DAYS[d - 1],
+            // 周几两个字**固定宽度**：下面号数那一行也是同样的固定宽度，
+            // 这样上下两排的左边点（红点 / 绿点）才在**同一条竖线**上。
+            h('span', { class: 'hdaytext', text: DAYS[d - 1] }),
             h('span', { class: 'dot' + (isTodayCol ? '' : ' off') })),
-          h('span', { class: 'hnum', text: dayNum }),
+          // 号数这一行：**绿点（日记）+ 号数 + 占位点**。
+          // 左右各留一个 4px 的点位（和上面「红点 / 蓝点」同样的 gap:3），
+          // 所以号数永远在正中，绿点出现 / 消失都**不会把数字挤偏**。
+          h('span', { class: 'hnumrow' },
+            h('span', { class: 'dot diary' + (hasDiary ? '' : ' off') }),
+            h('span', { class: 'hnum', text: dayNum }),
+            h('span', { class: 'dot off' })),
           h('span', { class: 'dot event' + (hasEvent ? '' : ' off') }))));
     }
 
@@ -4595,6 +4606,21 @@
     //
     // ⚠️ **卡片化之后**：待办条目的外层是 `.dpcard.todo`，
     // `data-todo-index` / `data-todo-key` 都挂在**卡片**上。
+    // **日记条目**：右键弹「修改… / 删除 / 取消」（和待办一样，2026-11-10）。
+    var diaryEl = e.target && e.target.closest ? e.target.closest('.dpdiaryrow') : null;
+    if (diaryEl && DP.open) {
+      var diaryId = diaryEl.getAttribute('data-diary-id') || '';
+      if (diaryId) {
+        post('diaryMenu', {
+          day: DP.day,
+          id: diaryId,
+          x: e.clientX,
+          y: e.clientY
+        });
+      }
+      return;
+    }
+
     var todoEl = e.target && e.target.closest ? e.target.closest('.dpcard.todo') : null;
     if (todoEl && DP.open) {
       var idx = parseInt(todoEl.getAttribute('data-todo-index'), 10);
@@ -4681,6 +4707,40 @@
   // =====================================================================
   // 日期覆盖层：暴露给原生的接口（契约见规格 8.3）
   // =====================================================================
+
+  /// 原生右键菜单选完之后回调（`修改…` / `删除`）。
+  window.ttDiaryMenuAction = function (action, payload) {
+    if (!payload || !payload.id) return;
+    if (action === 'delete') {
+      post('diaryDelete', { id: payload.id, day: DP.day });
+      // ⚠️ 本地也要**立刻**把这条从数据里摘掉（2026-11-10）：
+      // `renderPanel` 有「内容没变就早退」的指纹，只删 pending 不改数据的话
+      // 这一行会一直留在界面上（自检里就是「右键删除之后还有那一行」）。
+      var stripDiary = function (list) {
+        return (list || []).filter(function (e) { return e.id !== payload.id; });
+      };
+      if (typeof S !== 'undefined' && S && S.dayPanel && S.dayPanel.day === DP.day) {
+        S.dayPanel.diary = stripDiary(S.dayPanel.diary);
+      }
+      if (DP.cache && DP.cache[DP.day]) {
+        DP.cache[DP.day].diary = stripDiary(DP.cache[DP.day].diary);
+      }
+      DP.diaryPending = (DP.diaryPending || []).filter(function (p) {
+        return p.id !== payload.id;
+      });
+      renderPanel();
+      return;
+    }
+    if (action === 'edit') {
+      var data = panelDataFor(DP.day) || {};
+      var list = data.diary || [];
+      var hit = null;
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].id === payload.id) { hit = list[i]; break; }
+      }
+      if (hit) openDiaryForm('edit', hit);
+    }
+  };
 
   // 原生 push 状态用（等价于 ttUpdate 的 dayPanel / dayFlags 扩展）。
   // 传 { dayPanel: {...}, dayFlags: {...} }，可以带，也可以只带其中一个。

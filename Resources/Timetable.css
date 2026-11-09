@@ -330,6 +330,7 @@
 
 /* 红点 / 橙点的颜色（位置改由布局决定，不再绝对定位）。 */
 .dot.todo { background: #ef5f5b; }   /* 红点：有待办 */
+.dot.diary { background: #3ddc84; }  /* 绿点：当天有日记（和红点同一竖线，见 .hnumrow） */
 .dot.event { background: #f5a524; }  /* 橙点：有日程 */
 /* 没有待办 / 日程时**只隐藏、不摘节点** —— 节点摘掉/插回来会让
  * 「周一」两个字左右跳一下（用户看到的「表头闪一下」）。
@@ -349,7 +350,15 @@
  * 现在一律 gap: 3px，两边完全对称，文字的横向中心就是格子的中心，
  * 和下面 `.hnum` 的号数共用同一条竖中线。 */
 .hdrow { display: flex; align-items: center; gap: 3px; }
+/* 号数这一行：绿点 + 号数 + 占位点（左侧和上排红点**同一竖线**，
+ * 右侧留同样的位置，号数永远在正中 —— 绿点出现 / 消失都不会把数字挤偏）。 */
+.hnumrow { display: flex; align-items: center; gap: 3px; }
+/* 「周几」和「号数」都固定同一个宽度 → 上下两排的左右点位对齐。 */
+.hdaytext { display: inline-block; width: 24px; text-align: center; }
 .hnum {
+  display: inline-block;
+  width: 24px;
+  text-align: center;
   font-size: 12px; font-weight: 600;
   color: rgba(238, 241, 247, 0.62);
   font-variant-numeric: tabular-nums;

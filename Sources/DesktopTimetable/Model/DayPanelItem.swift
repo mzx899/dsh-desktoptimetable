@@ -76,6 +76,11 @@ struct DayPanelFlags: Equatable {
     var hasTodo: Bool = false
     /// 有日程（橙点）。
     var hasEvent: Bool = false
+    /// 当天有日记（绿点）。
+    ///
+    /// 日记是本 app 自己的数据（`diary.json`），**不依赖 EventKit 权限** ——
+    /// 所以即使提醒事项未接入 / 授权被拒，绿点照样要显示。
+    var hasDiary: Bool = false
 
     static let none = DayPanelFlags()
 }
@@ -214,7 +219,8 @@ extension DayPanelFlags {
     static func jsonObject(_ flags: [Int: DayPanelFlags]) -> [String: Any] {
         var out: [String: Any] = [:]
         for (day, f) in flags {
-            out["\(day)"] = ["todo": f.hasTodo, "event": f.hasEvent]
+            out["\(day)"] = ["todo": f.hasTodo, "event": f.hasEvent,
+                          "diary": f.hasDiary]
         }
         return out
     }

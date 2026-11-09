@@ -2199,6 +2199,11 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
         // 可滚动的范围跟着当前板块走 —— 短板块下面不再拖着一条空白。
         bindDocumentHeight(to: sectionStacks[section])
 
+        // 日记板块每次进都重读一次文件（2026-11-10）：
+        // 日记可能是**在日期覆盖层里写的**，设置面板里的列表是构建时建的，
+        // 不重读的话用户会以为「设置里没有这条记录」。
+        if section == .diary { refreshDiaryList() }
+
         // 收起态的首页隐藏，分类页头部显示。
         homeContainer?.isHidden = true
         homeContainer?.alphaValue = 0

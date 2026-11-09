@@ -1252,6 +1252,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             handleTodoMenuIntent(payload)
             return
         }
+        // 日记的右键菜单同理：`diaryMenu` 不能让 `diary*` 前缀把它送进
+        // DayPanelController（那边不认这个动作，菜单永远出不来）。
+        if action == "diaryMenu" {
+            handleDiaryMenuIntent(payload)
+            return
+        }
         // 日期覆盖层的 intent（datePanelOpen / datePanelToggle / …）
         // 单独交给 DayPanelController 处理。
         if action.hasPrefix("datePanel") || action.hasPrefix("todo") || action.hasPrefix("diary") {
@@ -3171,6 +3177,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             MenuPresenter.present(menu, at: screenPoint)
         }
 
+
+    /// 日记条目的右键菜单（和待办的同一套：修改… / 删除 / 取消）。
+    ///
+    /// 2026-11-10：面板列太窄，表单里的「删除」会被挤到卡片外，
+    /// 所以删除改成右键（用户要求「和提醒事项一样」）。
+    func handleDiaryMenuIntent(_ payload: Any?) {
+        guard let dict = payload as? [String: Any],
+              let id = dict["id"] as? String, !id.isEmpty else { return }
+
+        var screenPoint = NSEvent.mouseLocation
+        if let x = (dict["x"] as? NSNumber)?.doubleValue,
+           let y = (dict["y"] as? NSNumber)?.doubleValue,
+           let renderer = webRenderer, let window {
+            let height = renderer.webView.bounds.height
+            screenPoint = window.convertPoint(toScreen: NSPoint(x: x, y: height - y))
+        }
+
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let entries: [(String, Selector)] = [
+            ("修改…", #selector(diaryMenuEdit(_:))),
+            ("删除", #selector(diaryMenuDelete(_:))),
+            ("取消", #selector(diaryMenuCancel(_:))),
+        ]
+        for (title, action) in entries {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.representedObject = dict
+            menu.addItem(item)
+        }
+        MenuPresenter.present(menu, at: screenPoint)
+    }
+
+    @objc private func diaryMenuEdit(_ sender: NSMenuItem) {
+        applyDiaryMenuAction("edit", payload: sender.representedObject as? [String: Any])
+    }
+
+    @objc private func diaryMenuDelete(_ sender: NSMenuItem) {
+        applyDiaryMenuAction("delete", payload: sender.representedObject as? [String: Any])
+    }
+
+    @objc private func diaryMenuCancel(_ sender: NSMenuItem) {
+        // 显式入口；NSMenu 自己会把菜单关掉。
+    }
+
+    func applyDiaryMenuAction(_ action: String, payload: [String: Any]?) {
+        guard let payload, let json = Self.jsonString(payload) else { return }
+        let literal = action == "edit" ? "'edit'" : "'delete'"
+        webRenderer?.webView.evaluateJavaScript(
+            "if (window.ttDiaryMenuAction) window.ttDiaryMenuAction(\(literal), \(json));")
+    }
 
     @objc private func todoMenuDelete(_ sender: NSMenuItem) {
         applyTodoMenuAction("delete", payload: sender.representedObject as? [String: Any])

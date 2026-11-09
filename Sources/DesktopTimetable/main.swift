@@ -10031,8 +10031,10 @@ if let idx = arguments.firstIndex(of: "--shot-day-panel") {
               { id: 'd1', title: '本周计划', body: '周三交报告\\n记得带U盘', time: '20:00' },
               { id: 'd2', title: '', body: '只有正文、没有标题的这一篇。', time: '' }
             ], festival: fest };
+          // 出图要能同时看到红点 + 绿点，好核对「同一竖线」。
           window.ttUpdate({ dayPanel: panel, dayFestivals: festAll,
-            dayFlags: {}, courses: [], viewWeek: 2 });
+            dayFlags: { '3': { todo: true, event: false, diary: true } },
+            courses: [], viewWeek: 2 });
           window.ttDayPanelOpen(3, false);
           return 'ok';
         })();
@@ -10041,6 +10043,24 @@ if let idx = arguments.firstIndex(of: "--shot-day-panel") {
         for _ in 0..<40 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
 
         let base = (out as NSString).deletingPathExtension
+        // 整张卡片也存一张（核对表头红点 / 绿点对齐用）。
+        do {
+            var done = false
+            let cfg = WKSnapshotConfiguration()
+            cfg.rect = renderer.webView.bounds
+            renderer.webView.takeSnapshot(with: cfg) { image, _ in
+                defer { done = true }
+                guard let image, let tiff = image.tiffRepresentation,
+                      let rep = NSBitmapImageRep(data: tiff),
+                      let data = rep.representation(using: .png, properties: [:]) else { return }
+                try? data.write(to: URL(fileURLWithPath: base + "-full.png"))
+                print("已截图 整卡 → \(base)-full.png")
+            }
+            for _ in 0..<120 {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+                if done { break }
+            }
+        }
         snapDiary(base + "-list.png", "日记列表")
 
         // 图 2：编辑态（点「＋ 写日记」再填内容）
@@ -10055,6 +10075,18 @@ if let idx = arguments.firstIndex(of: "--shot-day-panel") {
             "b.dispatchEvent(new Event('input',{bubbles:true}));}" +
             "return 'ok';})();"
         ) { r in print("打开写日记：\(r ?? "nil")") }
+        for _ in 0..<40 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+        renderer.evaluateForTest("""
+        (function () {
+          var add = document.querySelector('.dpdiaryadd');
+          var form = document.querySelector('.dpdiaryform');
+          return JSON.stringify({
+            addDisplay: add ? add.style.display : 'missing',
+            addVisible: add ? (add.offsetParent !== null) : false,
+            formDisplay: form ? form.style.display : 'missing'
+          });
+        })();
+        """) { r in print("[诊断] 写日记时加号行：\(r ?? "nil")") }
         for _ in 0..<40 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
         snapDiary(base + "-edit.png", "写日记表单")
         exit(0)
@@ -10816,16 +10848,23 @@ if arguments.contains("--verify-day-panel-click") {
         var row = cell.querySelector('.hdrow');
         var num = cell.querySelector('.hnum');
         if (!row || !num) { out.push({ day: -1, error: 'missing' }); continue; }
-        var textNode = null;
-        for (var j = 0; j < row.childNodes.length; j++) {
-          if (row.childNodes[j].nodeType === 3 && row.childNodes[j].textContent.trim()) {
-            textNode = row.childNodes[j]; break;
+        // 2026-11-10：「周几」现在是包起来的 `<span class="hdaytext">`
+        //（固定 24px 宽，好让上下两排的左右点位对齐）—— 老页面兜底找文本节点。
+        var tr = null;
+        var textEl = row.querySelector('.hdaytext');
+        if (textEl) {
+          tr = textEl.getBoundingClientRect();
+        } else {
+          for (var j = 0; j < row.childNodes.length; j++) {
+            if (row.childNodes[j].nodeType === 3 && row.childNodes[j].textContent.trim()) {
+              var range = document.createRange();
+              range.selectNodeContents(row.childNodes[j]);
+              tr = range.getBoundingClientRect();
+              break;
+            }
           }
         }
-        if (!textNode) { out.push({ day: -1, error: 'no-text' }); continue; }
-        var range = document.createRange();
-        range.selectNodeContents(textNode);
-        var tr = range.getBoundingClientRect();
+        if (!tr) { out.push({ day: -1, error: 'no-text' }); continue; }
         var nr = num.getBoundingClientRect();
         out.push({
           day: parseInt(cell.getAttribute('data-day'), 10),
@@ -11343,6 +11382,51 @@ if arguments.contains("--verify-day-panel-click") {
               "原生推回来之后仍然只有一行（乐观条必须去重，实际 \(saved?["rows"] ?? "nil") 行）")
         check(rowText.contains("自检日记"), "列表行里要有刚写的标题（实际「\(rowText)」）")
         check(rowText.contains("正文第一行"), "列表行里要显示正文")
+        // ---- 右键菜单：修改… / 删除 / 取消（2026-11-10，面板太窄所以不放表单里）----
+        let menuPost = eval("""
+        (function () {
+          var row = document.querySelector('.dpdiaryrow');
+          if (!row) return JSON.stringify({ ok: false });
+          var r = row.getBoundingClientRect();
+          row.dispatchEvent(new MouseEvent('contextmenu', {
+            bubbles: true, cancelable: true,
+            clientX: r.left + 4, clientY: r.top + 4
+          }));
+          var p = window.__ttLastPost;
+          return JSON.stringify({ ok: true, action: p ? p.action : null,
+                                 hasID: !!(p && p.payload && p.payload.id) });
+        })();
+        """)
+        print("[诊断] 日记右键：\(menuPost?.description ?? "nil")")
+        check((menuPost?["action"] as? String) == "diaryMenu",
+              "右键日记条目要发 diaryMenu（实际 \(menuPost?["action"] ?? "nil")）")
+        check((menuPost?["hasID"] as? Bool) == true, "右键菜单要带上日记 id")
+
+        // 走原生菜单的「删除」动作（和 NSMenu 里点删除同一条路）。
+        let deleted = eval("""
+        (function () {
+          var p = window.__ttLastPost;
+          if (!p || !p.payload || !p.payload.id) return JSON.stringify({ ok: false });
+          window.ttDiaryMenuAction('delete', { id: p.payload.id, day: p.payload.day });
+          return JSON.stringify({ ok: true });
+        })();
+        """)
+        pause(0.8)
+        let afterDelete = eval("""
+        (function () {
+          var rows = document.querySelectorAll('.dpdiaryrow');
+          return JSON.stringify({ rows: rows.length });
+        })();
+        """)
+        print("[诊断] 右键删除后：\(afterDelete?.description ?? "nil")")
+        check((deleted?["ok"] as? Bool) == true, "ttDiaryMenuAction('delete') 要能执行")
+        check((afterDelete?["rows"] as? NSNumber)?.intValue == 0, "右键删除之后列表里不能还有那一行")
+        let store = DiaryStore(directory: URL(fileURLWithPath:
+            ProcessInfo.processInfo.environment["DT_DATA_DIR"] ?? ""))
+        if store.count() != 0 {
+            check(false, "右键删除之后 diary.json 里不能还有条目（实际 \(store.count()) 条）")
+        }
+
         let diaryFile = URL(fileURLWithPath: ProcessInfo.processInfo.environment["DT_DATA_DIR"] ?? "")
             .appendingPathComponent("diary.json")
         check(FileManager.default.fileExists(atPath: diaryFile.path),

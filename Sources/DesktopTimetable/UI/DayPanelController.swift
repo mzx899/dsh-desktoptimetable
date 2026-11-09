@@ -565,6 +565,7 @@ final class DayPanelController {
         // → 刚写的那篇**在面板里不出现**（实测 rows = 0，但 diary.json 里已经有了）。
         guard currentDay == nil || currentDay == day else { return }
         content.diary = entries
+        refreshAll()   // 绿点跟着变（本地数据，很快）
         pushState()
     }
 
@@ -1222,10 +1223,6 @@ final class DayPanelController {
         // 算完存进 `festivalByDay`，push 时一起给网页。
         refreshFestivalCache()
         content.festival = festivalByDay[day] ?? festivalProvider.festival(on: date)
-        // 日记是**本地 JSON**，同步读就行（不经过 EventKit、没有授权问题）。
-        content.diary = diaryStore.entries(on: DiaryStore.dateKey(date)).map {
-            DayPanelDiary(id: $0.id, title: $0.title, body: $0.body, time: $0.time)
-        }
 
         if resetImmediately {
             // ⚠️ 换天时**必须清空**上一天的 todos / events ——
@@ -1233,8 +1230,11 @@ final class DayPanelController {
             // 待办和日程，网页会把它显示出来（显示成今天有昨天的待办）。
             content.todos = []
             content.events = []
-            // 日记同样要清 —— 否则换天时会短暂显示上一天的日记。
-            content.diary = []
+            // ⚠️ 日记**不在这里清**（2026-11-10 修「记完日记收起 / 翻周就没了」）：
+            // 以前这里清空、而真正的读取又写在这段**前面** ——
+            // 于是每次打开某天，日记都会被「读进来 → 立刻清掉」，
+            // 面板永远显示空，设置里也因为同一次读写的时序看不到。
+            // 现在统一在下面（reset 之后）读一次。
             // 天气也要清 —— 否则新的一天会暂时显示**昨天**的天气。
             content.festival.weather = nil
             // ⚠️ 这是**中间态** —— 待办 / 日程还没查。
@@ -1249,6 +1249,12 @@ final class DayPanelController {
 
             // 天气是**异步**的（CoreLocation + 网络），单独一条线。
             loadWeather(day: day, token: token)
+        }
+
+        // 日记是**本地 JSON**，同步读就行（不经过 EventKit、没有授权问题）。
+        // ⚠️ 必须放在 reset 之后 —— 放在前面会被上面那次清空抹掉。
+        content.diary = diaryStore.entries(on: DiaryStore.dateKey(date)).map {
+            DayPanelDiary(id: $0.id, title: $0.title, body: $0.body, time: $0.time)
         }
 
         guard settings.enabled else {
@@ -1603,13 +1609,30 @@ final class DayPanelController {
         // 和用户看到的「所有周」对不上号，会误导。
         //
         // 用户确认：全部周次下**不显示**红点。
+        // 日记绿点：**本地数据**，不管 EventKit 有没有授权都要算（2026-11-10）。
+        var diaryFlags: [Int: Bool] = [:]
+        if !allWeeksMode {
+            for day in 1...7 {
+                guard let date = dayDate(day) else { continue }
+                diaryFlags[day] = !diaryStore.entries(on: DiaryStore.dateKey(date)).isEmpty
+            }
+        }
+        func diaryOnlyFlags() -> [Int: DayPanelFlags] {
+            var out: [Int: DayPanelFlags] = [:]
+            for day in 1...7 {
+                out[day] = DayPanelFlags(hasTodo: false, hasEvent: false,
+                                         hasDiary: diaryFlags[day] ?? false)
+            }
+            return out
+        }
         guard !allWeeksMode else {
             flags = [:]
             pushState()
             return
         }
         guard settings.enabled, reminderAuthorized || eventAuthorized else {
-            flags = [:]
+            // 没接提醒事项 / 日历：红点橙点没有，但**日记绿点照常显示**。
+            flags = diaryOnlyFlags()
             pushState()
             return
         }
@@ -1640,7 +1663,8 @@ final class DayPanelController {
             var merged: [Int: DayPanelFlags] = [:]
             for day in 1...7 {
                 merged[day] = DayPanelFlags(hasTodo: todoFlags[day] ?? false,
-                                            hasEvent: eventFlags[day] ?? false)
+                                            hasEvent: eventFlags[day] ?? false,
+                                            hasDiary: diaryFlags[day] ?? false)
             }
             self.flags = merged
             self.pushState()
