@@ -268,6 +268,8 @@
   var DP = {
     // 日记表单状态：null / {mode:'add'} / {mode:'edit', id}
     diaryForm: null,
+    // 刚提交、还没等到原生推回来的日记（乐观插入，按标题 + 正文 + 时间去重）
+    diaryPending: [],
     day: null,       // 当前显示的是哪一列（1…7），null = 没打开
     // ⚠️ **不再有「宽态」**（2026-11 去掉双击展开）——
     //
@@ -571,7 +573,21 @@
       var base = p;
       if (p.ready === false) {
         var complete = DP.cache[day];
-        if (complete && complete.ready !== false) base = complete;
+        if (complete && complete.ready !== false) {
+          base = complete;
+          // ⚠️ 日记是**本地数据**，不经过 EventKit —— 原生写完就推。
+          // 而这里如果退回「完整缓存」，缓存里可能还没有刚写的那篇
+          //（用户反馈「日记点了保存但是没有显示出来」）。
+          // 所以：**新推来的 diary 永远以它为准**，覆盖缓存里的旧日记。
+          if (p.diary && p.diary.length !== undefined) {
+            var mergedBase = {};
+            for (var kb in base) {
+              if (Object.prototype.hasOwnProperty.call(base, kb)) mergedBase[kb] = base[kb];
+            }
+            mergedBase.diary = p.diary;
+            base = mergedBase;
+          }
+        }
       }
       if (f && typeof f === 'object') {
         var merged = {};
@@ -2030,6 +2046,8 @@
   window.ttCancelEditing = function () {
     if (DP.adding) { closeTodoCompose(); return true; }
     if (DP.editingTodoKey) { cancelTodoEdit(); return true; }
+    // 写日记时 Esc 也要能取消（2026-11-10）。
+    if (DP.diaryForm) { closeDiaryForm(); return true; }
     return false;
   };
 
@@ -2037,7 +2055,7 @@
     if (e.key !== 'Escape' && e.keyCode !== 27) return;
     // 输入法正在组词 → 这一下先让输入法自己取消。
     if (e.isComposing || e.keyCode === 229) return;
-    if (DP.adding || DP.editingTodoKey) {
+    if (DP.adding || DP.editingTodoKey || DP.diaryForm) {
       e.preventDefault();
       window.ttCancelEditing();
     }
@@ -2220,8 +2238,21 @@
     if (DP.diaryForm.mode === 'edit') {
       payload.id = DP.diaryForm.id;
       post('diaryUpdate', payload);
+      // 改：本地也先覆盖掉旧内容（原生推回来之后用真实数据替换）。
+      DP.diaryPending = (DP.diaryPending || []).filter(function (p) {
+        return !(p.id === payload.id);
+      });
+      DP.diaryPending.push({ id: payload.id, title: title, body: body,
+                             time: payload.time, localEdit: true });
     } else {
       post('diaryAdd', payload);
+      // ⚠️ **乐观插入**（2026-11-10 修「点了保存但是没显示出来」）。
+      // 原生写盘 / 推状态是异步的，中间还可能有「换天清空」的中间态；
+      // 这段时间里用户看不到自己刚写的东西，就会以为没保存成功。
+      // 先在本地挂一条，原生推回来之后按「标题 + 正文 + 时间」自动去掉。
+      DP.diaryPending = DP.diaryPending || [];
+      DP.diaryPending.push({ id: 'local-' + Date.now(), title: title, body: body,
+                             time: payload.time });
     }
     closeDiaryForm();
   }
@@ -2233,6 +2264,34 @@
       // 换天了：把表单收起来（不然会把昨天的草稿写进今天）。
       DP_diaryDay = day;
       DP.diaryForm = null;
+      DP.diaryPending = [];
+    }
+    // 原生已经推回来、内容对得上的「本地乐观条」→ 去掉（避免出现两条一样的）。
+    var pending = DP.diaryPending || [];
+    pending = pending.filter(function (p) {
+      // 原生推回来的「真」条目和本地 optimistic 条内容一致 → 本地那条可以撤了。
+      return !items.some(function (d) {
+        return (d.title || '') === (p.title || '') &&
+               (d.body || '') === (p.body || '') &&
+               (d.time || '') === (p.time || '');
+      });
+    });
+    // 编辑态：原生的那条如果已经是改后的内容，就把本地那条也去掉。
+    pending = pending.filter(function (p) {
+      if (!p.localEdit) return true;
+      var hit = items.some(function (d) {
+        return d.id === p.id && (d.title || '') === (p.title || '') &&
+               (d.body || '') === (p.body || '');
+      });
+      return !hit;
+    });
+    DP.diaryPending = pending;
+    if (pending.length) {
+      items = items.filter(function (d) {
+        return !pending.some(function (p) { return p.localEdit && p.id === d.id; });
+      }).concat(pending.map(function (p) {
+        return { id: p.id, title: p.title, body: p.body, time: p.time };
+      }));
     }
     ensureDiaryForm();
     if (!DP_diaryCard) {
@@ -3583,6 +3642,9 @@
     // 用户原话：「点了添加待办 / 正在改某列的待办，鼠标不小心滑到别的列，
     // 原本要输入的那一列就没了 —— 把它固定住，以免鼠标误滑动」。
     //
+    // 2026-11-10：**写日记时同样锁列**（用户：「点击了添加日记之后输入的时候
+    // 移动到别的列，不跳转，仍留在当前这一列」）—— 条件里加了 `DP.diaryForm`。
+    //
     // 换列 = `openPanel(day)` 重建整块内容 → 正在输入的 `<input>` 被销毁，
     // 打了一半的标题 / 时间直接丢。所以输入期间**只认当前那一列**：
     // 指针滑到别的列就当没发生（面板留在原列、内容不动）。
@@ -3593,7 +3655,7 @@
     //
     // 注意：**点表头仍然是主动换列**（那是明确意图，会放弃正在输入的内容）——
     // 这条只拦「移动」。
-    if (DP.adding || DP.editingTodoKey) {
+    if (DP.adding || DP.editingTodoKey || DP.diaryForm) {
       DP.hoverDay = DP.day;
       return;
     }
@@ -3606,7 +3668,7 @@
       // 权限框在屏幕中央弹出，用户去点「允许」必然离开卡片，
       // 这时把面板收走 = 「点一下新增提醒事项面板直接消失」。
       // 权限框流程 / 打字期间面板必须留着，提交或 Esc 后才恢复。
-      if (DP.open && !DP.adding) {
+      if (DP.open && !DP.adding && !DP.diaryForm) {
         fadeOutPanel();
       }
       return;

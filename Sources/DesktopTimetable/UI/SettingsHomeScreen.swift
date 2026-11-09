@@ -77,12 +77,15 @@ final class SettingsHomeScreen: NSView {
     /// 每块砖的宽度（点）。
     ///
     /// 固定宽度 —— 不跟着窗口拉伸（收起态的宽度是固定的）。
-    /// 四块砖 + 间距正好铺满 580 宽的面板。
-    static let tileWidth: CGFloat = 128
-    /// 砖之间��间距。
-    static let tileSpacing: CGFloat = 14
-    /// 砖的高度（点）。
-    static let tileHeight: CGFloat = 84
+    ///
+    /// ⚠️ 2026-11-10：板块从 4 个变 5 个之后，原来的 128pt 让一排宽 696pt，
+    /// **超出了 580pt 的面板**（用户反馈「设置这几个图标左右都显示不完全」）。
+    /// 现在 5 块 × 96 + 4 × 10 = 520pt，两侧各留 30pt，5 个完整放得下。
+    static let tileWidth: CGFloat = 96
+    /// 砖之间的间距（点）。
+    static let tileSpacing: CGFloat = 10
+    /// 砖的高度（点）—— 5 块之后也压矮一点，和更窄的砖成比例。
+    static let tileHeight: CGFloat = 78
     /// 四个砖 + 间距的总宽度（点）。
     static var rowWidth: CGFloat {
         CGFloat(SettingsSection.allCases.count) * tileWidth

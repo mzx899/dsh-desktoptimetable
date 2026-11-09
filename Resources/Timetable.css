@@ -1873,7 +1873,36 @@ input.dptimepart:focus {
 .dpdiaryform .dpdiary-text::placeholder,
 .dpdiaryform input::placeholder { color: rgba(238, 241, 247, 0.32); }
 
-/* 表单按钮行：删除在左、取消 / 保存在右。 */
+/* 表单按钮行：删除在左、取消 / 保存在右。
+ *
+ * ⚠️ 2026-11-10：以前「取消」「保存」是裸露的文字 span，宽度跟着字数走
+ *（「取消」两个字、「保存」两个字，但左右内边距不同）→ 两个按钮**不一样大**。
+ * 现在统一成：固定最小宽度 + 居中 + 同样的内边距 / 圆角 / 边框。
+ */
 .dpdiaryform .dpaddact { display: flex; align-items: center; gap: 6px; justify-content: flex-end; width: 100%; }
+.dpdiaryform .dpaddact .dpok,
+.dpdiaryform .dpaddact .dpcancel {
+  flex: 0 0 auto;
+  min-width: 38px;
+  box-sizing: border-box;
+  padding: 3px 0;
+  text-align: center;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 10.5px;
+  line-height: 1.2;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.dpdiaryform .dpaddact .dpok {
+  color: #f5c26b;
+  border-color: rgba(245, 194, 107, 0.45);
+  background: rgba(245, 194, 107, 0.14);
+}
+.dpdiaryform .dpaddact .dpok:hover { background: rgba(245, 194, 107, 0.24); }
+.dpdiaryform .dpaddact .dpcancel { color: rgba(255, 255, 255, 0.78); }
+.dpdiaryform .dpaddact .dpcancel:hover { background: rgba(255, 255, 255, 0.12); }
 .dpdiaryform .dpddel { margin-right: auto; color: #ef5f5b; cursor: pointer; font-size: 10.5px; }
 .dpdiaryform .dpddel:hover { color: #ff7b77; }

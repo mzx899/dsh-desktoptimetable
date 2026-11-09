@@ -5538,10 +5538,11 @@ if arguments.contains("--verify-day-panel") {
                   "第 \(day) 列的覆盖层里必须有「今日详情」这张卡")
             check((info["detailCards"] as? NSNumber)?.intValue == 1,
                   "第 \(day) 列的「今日详情」要正好一张卡（实际 \(info["detailCards"] ?? "?") 张）")
-            // 空数据时：待办 / 日程各一张空状态卡 + 今日详情一张 + 添加待办一张 = 4 张。
+            // 空数据时：待办 / 日记 / 日程各一张空状态卡 + 今日详情一张 + 添加待办一张 = 5 张
+            //（2026-11-10 加日记卡）。
             let cardCount = (info["count"] as? NSNumber)?.intValue ?? -1
-            check(cardCount == 4,
-                  "第 \(day) 列的覆盖层必须有 4 张卡（空待办 + 空日程 + 今日详情 + 添加待办，实际 \(cardCount) 张）")
+            check(cardCount == 5,
+                  "第 \(day) 列的覆盖层必须有 5 张卡（空待办 + 日记 + 空日程 + 今日详情 + 添加待办，实际 \(cardCount) 张）")
         }
     } else {
         fail("拿不到今日详情的诊断结果")
@@ -5763,9 +5764,10 @@ if arguments.contains("--verify-day-panel") {
        let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
         // ---- 条目数 = 卡片数 ----
         //
-        // 3 条待办 + 2 条日程 + 1 张今日详情 + 1 张「＋ 添加待办」= 7 张。
-        check((obj["cardCount"] as? NSNumber)?.intValue == 7,
-              "3 待办 + 2 日程 + 今日详情 + 添加待办 = 7 张卡片（实际 \(obj["cardCount"] ?? "?") 张）")
+        // 3 条待办 + 1 张日记（空态）+ 2 条日程 + 1 张今日详情 + 1 张「＋ 添加待办」= 8 张
+        //（2026-11-10 加日记卡）。
+        check((obj["cardCount"] as? NSNumber)?.intValue == 8,
+              "3 待办 + 日记 + 2 日程 + 今日详情 + 添加待办 = 8 张卡片（实际 \(obj["cardCount"] ?? "?") 张）")
         check((obj["todoCards"] as? NSNumber)?.intValue == 3,
               "每条待办一张卡（实际 \(obj["todoCards"] ?? "?") 张）")
         check((obj["eventCards"] as? NSNumber)?.intValue == 2,
@@ -5825,8 +5827,8 @@ if arguments.contains("--verify-day-panel") {
 
         // ---- 溢出 → 面板内滚动，能滚到底 ----
         // 30 条待办 + 1 张「＋ 添加待办」+ 1 张「今日无日程」空状态 + 1 张今日详情 = 33。
-        check((obj["manyCards"] as? NSNumber)?.intValue == 33,
-              "30 条待办一张都不能少（+ 添加待办 + 无日程 + 详情 = 33 张，实际 \(obj["manyCards"] ?? "?") 张）")
+        check((obj["manyCards"] as? NSNumber)?.intValue == 34,
+              "30 条待办一张都不能少（+ 添加待办 + 日记 + 无日程 + 详情 = 34 张，实际 \(obj["manyCards"] ?? "?") 张）")
         check((obj["overflowY"] as? String) == "auto",
               "内容超高时底板要能滚（overflow-y = \(obj["overflowY"] ?? "?")）")
         check((obj["canScroll"] as? Bool) == true,
@@ -5882,7 +5884,8 @@ if arguments.contains("--verify-day-panel") {
         check(before > 0, "先滚下去一点（实际 \(before)pt）")
         check(abs(after - before) <= 2,
               "原生推状态后滚动位置要保持（\(before) → \(after)）")
-        check((obj["cardsStillThere"] as? NSNumber)?.intValue == 33,
+        // 2026-11-10：日记卡是第 34 张（待办 / 日记 / 日程 / 详情 × 各列）。
+        check((obj["cardsStillThere"] as? NSNumber)?.intValue == 34,
               "推状态之后卡片不能消失（实际 \(obj["cardsStillThere"] ?? "?") 张）")
     } else {
         fail("拿不到滚动位置的诊断结果")
@@ -9322,6 +9325,12 @@ if arguments.contains("--shot-settings") {
     RunLoop.main.run(until: Date().addingTimeInterval(1.6))
     win.contentView?.layoutSubtreeIfNeeded()
     RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+    // 可选：`home-shot` —— 退回首页（5 个板块砖），用来核对 5 个能不能放下。
+    if arguments.contains("home-shot") {
+        ctl.backToHome()
+        RunLoop.main.run(until: Date().addingTimeInterval(1.4))
+        win.contentView?.layoutSubtreeIfNeeded()
+    }
     print("设置面板尺寸：\(win.frame.size)")
 
     // 可选：**从屏幕抓**（`DT_SHOT_SCREEN=1`）。
@@ -11298,6 +11307,18 @@ if arguments.contains("--verify-day-panel-click") {
         """)
         pause(0.2)
         realClick(".dpdiaryform .dpok", "保存日记")
+        // ① 先看**立刻**有没有（乐观插入）—— 用户反馈「点了保存但是没有显示出来」。
+        pause(0.15)
+        let immediate = eval("""
+        (function () {
+          var rows = document.querySelectorAll('.dpdiaryrow');
+          return JSON.stringify({ rows: rows.length });
+        })();
+        """)
+        print("[诊断] 保存后立刻：\(immediate?.description ?? "nil")")
+        check((immediate?["rows"] as? NSNumber)?.intValue == 1,
+              "点了保存之后要**立刻**看到那一行（不能干等原生推回来）")
+        // ② 再等原生推回来：乐观条要去重，不能变成两条。
         pause(1.2)
         let saved = eval("""
         (function () {
@@ -11318,7 +11339,8 @@ if arguments.contains("--verify-day-panel-click") {
         // 面板数据是按天缓存的（`DP.loaded`），刚写的那篇在 DOM 里、
         // 缓存里的那份要等下一次整推才更新 —— 读缓存会误判。
         let rowText = (saved?["rowText"] as? String) ?? ""
-        check((saved?["rows"] as? NSNumber)?.intValue == 1, "保存之后列表里要出现那一行")
+        check((saved?["rows"] as? NSNumber)?.intValue == 1,
+              "原生推回来之后仍然只有一行（乐观条必须去重，实际 \(saved?["rows"] ?? "nil") 行）")
         check(rowText.contains("自检日记"), "列表行里要有刚写的标题（实际「\(rowText)」）")
         check(rowText.contains("正文第一行"), "列表行里要显示正文")
         let diaryFile = URL(fileURLWithPath: ProcessInfo.processInfo.environment["DT_DATA_DIR"] ?? "")
