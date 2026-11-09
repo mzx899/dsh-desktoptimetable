@@ -1514,10 +1514,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///
     /// 标注：**实验性**。合成事件不会驱动 CSS 伪类，
     /// 所以网页侧是用 `.tt-hover` 类手动模拟悬停态。
+    /// 指针是不是落在「本 App 的其它窗口」上（设置面板 / 弹窗 / 对话框）。
+    ///
+    /// 抽成**静态纯函数**是为了能单测：`syncLiveHover` 依赖真实鼠标和 live 模式，
+    /// 在测试里没法稳定构造。这里只做几何 + 可见性判断。
+    static func pointer(_ point: NSPoint,
+                        isOverOwnWindowOtherThan card: NSWindow?,
+                        in windows: [NSWindow] = NSApp.windows) -> Bool {
+        windows.contains { other in
+            other !== card && other.isVisible && other.frame.contains(point)
+        }
+    }
+
     private func syncLiveHover() {
         guard let renderer = webRenderer, renderer.liveMode, let window else { return }
         // 自检可以用 `testHoverProbe` 代替真实指针（否则断言取决于鼠标当时在哪）。
         let screen = testHoverProbe?.pointer ?? NSEvent.mouseLocation
+
+        // ⚠️ **指针在我们自己的其它窗口上时，不要驱动课表的悬停**（2026-11-10 修）。
+        //
+        // 用户原话：「点开设置之后蹦出来的窗口，我的鼠标在这个窗口上移动，
+        // 但是课表上还是会有对应的显示……课表上的日历也会生出来，并在不同列切换」。
+        //
+        // 根因：设置面板 / 弹窗是**盖在卡片矩形上面**的，指针落在那上面时
+        // 几何上仍然「在 cardRect 里」→ 下面这段照常把坐标转给网页 →
+        // 网页按列跟着换。而窗口本身的可见性是另一条线（`updateHover` 里
+        // 「本 App 其它窗口算 inside」），所以课表不会淡出 —— 两边对不上。
+        //
+        // 现在：指针在自家窗口（设置 / 弹窗 / 菜单）上 → **直接冻结**，
+        // 既不推进 hover，也不发 clear（发 clear 会让面板淡出，用户要求「不消失」）。
+        if MenuPresenter.isMenuShowing { return }
+        if Self.pointer(screen, isOverOwnWindowOtherThan: window) { return }
         // 屏幕坐标 → 窗口坐标
         let inWindow = window.convertPoint(fromScreen: screen)
         // ⚠️ **日期覆盖层那一列也算「在课表上」**（2026-11 修「鼠标移到日历上日历就没了」）：

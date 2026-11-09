@@ -7300,6 +7300,123 @@ suite("外观配置 · cardScale 往返") {
 DialogStyleTests.run()
 
 print("")
+// MARK: - 日记回收站（2026-11-10）
+
+suite("日记 · 回收站（软删除 / 恢复 / 30 天 / 清空）") {
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("dt-diary-trash-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let store = DiaryStore(directory: dir)
+
+    let a = try! store.add(date: "2026-11-11", title: "要删的", body: "x", time: "")
+    _ = try! store.add(date: "2026-11-12", title: "留着的", body: "y", time: "")
+
+    // 删 = 进回收站，不是真删。
+    _ = try! store.delete(id: a.id)
+    expectEqual(store.count(), 1, "删除之后未删除的只剩 1 条")
+    expectEqual(store.deletedEntries().count, 1, "回收站里应该有 1 条")
+    expectEqual(store.deletedEntries().first?.title, "要删的", "回收站里那条内容要对")
+
+    // 恢复：回到列表。
+    _ = try! store.restore(id: a.id)
+    expectEqual(store.count(), 2, "恢复之后未删除的回到 2 条")
+    expectEqual(store.deletedEntries().count, 0, "回收站清空")
+
+    // 再删一次 + 清空回收站。
+    _ = try! store.delete(id: a.id)
+    expectEqual(try! store.emptyTrash(), 1, "清空回收站要删掉 1 条")
+    expectEqual(store.deletedEntries().count, 0, "清空之后回收站为空")
+    expectEqual(store.count(), 1, "只影响回收站，另一条还在")
+
+    // 30 天前的「已删除」要**自动清掉**（读的时候顺手清）。
+    let old = try! store.add(date: "2026-11-13", title: "很久以前删的", body: "", time: "")
+    _ = try! store.delete(id: old.id)
+    var raw = try! JSONDecoder().decode([String: JSONValue].self,
+                                        from: Data(contentsOf: dir.appendingPathComponent("diary.json")))
+    // 直接把文件里的 deletedAt 改到 31 天前
+    if var entries = raw["entries"]?.array {
+        for i in entries.indices {
+            if entries[i].object?["id"]?.string == old.id {
+                var obj = entries[i].object ?? [:]
+                obj["deletedAt"] = .number(Date().timeIntervalSince1970 - 31 * 86400)
+                entries[i] = .object(obj)
+            }
+        }
+        raw["entries"] = .array(entries)
+        let data = try! JSONEncoder().encode(raw)
+        try! data.write(to: dir.appendingPathComponent("diary.json"))
+    }
+    let reopened = DiaryStore(directory: dir)
+    expectEqual(reopened.deletedEntries().count, 0, "31 天前的已删除要自动清掉")
+}
+
+/// 测试里用来改 JSON 的最小值类型（只是为了让上面的「改时间」测试能写文件）。
+enum JSONValue: Codable {
+    case number(Double)
+    case string(String)
+    case object([String: JSONValue])
+    case array([JSONValue])
+    case null
+
+    var object: [String: JSONValue]? { if case let .object(v) = self { return v }; return nil }
+    var array: [JSONValue]? { if case let .array(v) = self { return v }; return nil }
+    var string: String? { if case let .string(v) = self { return v }; return nil }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if let d = try? c.decode(Double.self) { self = .number(d); return }
+        if let s = try? c.decode(String.self) { self = .string(s); return }
+        if let o = try? c.decode([String: JSONValue].self) { self = .object(o); return }
+        if let a = try? c.decode([JSONValue].self) { self = .array(a); return }
+        self = .null
+    }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .number(let d): try c.encode(d)
+        case .string(let s): try c.encode(s)
+        case .object(let o): try c.encode(o)
+        case .array(let a): try c.encode(a)
+        case .null: try c.encodeNil()
+        }
+    }
+}
+
+
+
+// MARK: - 悬停隔离：指针在设置面板 / 弹窗上时不影响课表（2026-11-10）
+
+suite("悬停隔离 · 指针落在自家其它窗口上") {
+    let card = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 200),
+                        styleMask: [.borderless], backing: .buffered, defer: true)
+    let panel = NSWindow(contentRect: NSRect(x: 400, y: 400, width: 200, height: 300),
+                         styleMask: [.borderless], backing: .buffered, defer: true)
+    panel.orderFront(nil)
+    defer { panel.orderOut(nil) }
+
+    // 指针在设置面板里 → 要冻结（true）。
+    expect(AppDelegate.pointer(NSPoint(x: 500, y: 500),
+                               isOverOwnWindowOtherThan: card,
+                               in: [card, panel]),
+           "指针在设置面板里时要判成「在自家窗口上」")
+    // 指针在卡片里 → 不冻结。
+    expect(!AppDelegate.pointer(NSPoint(x: 100, y: 100),
+                                isOverOwnWindowOtherThan: card,
+                                in: [card, panel]),
+           "指针在课表卡片里时不能冻结")
+    // 卡片自己是「其它窗口」的排除对象（不能把自己算进去）。
+    expect(!AppDelegate.pointer(NSPoint(x: 100, y: 100),
+                                isOverOwnWindowOtherThan: card,
+                                in: [card]),
+           "课表窗口自己不能被当成「其它窗口」")
+    // 隐藏的窗口不算。
+    panel.orderOut(nil)
+    expect(!AppDelegate.pointer(NSPoint(x: 500, y: 500),
+                                isOverOwnWindowOtherThan: card,
+                                in: [card, panel]),
+           "隐藏的窗口不该影响判断")
+}
+
 if failures == 0 {
     print("✓ 全部通过（\(checks) 项断言）")
     exit(0)
@@ -7351,7 +7468,8 @@ suite("日记 · 存储（增 / 改 / 删 / 排序）") {
     // 换一个 store 实例读同一份文件（证明真的落盘了）。
     let reread = DiaryStore(directory: dir)
     expectEqual(reread.entries(on: "2026-11-11").count, 2, "重新打开文件应该还能读到 2 条")
-    expectEqual(reread.count(), 3, "全量 3 条（两天）")
+    expectEqual(reread.count(), 2, "未删除的还剩 2 条（删掉的那条进回收站，不算）")
+    expectEqual(reread.deletedEntries().count, 1, "删掉的那条应该在「最近删除」里")
 }
 
 suite("日记 · 坏文件不吞数据") {

@@ -1779,6 +1779,20 @@ input.dptimepart:focus {
      · 列表每行两行文字：`时间 + 标题` / 正文摘要（最多 2 行）；
      · 表单是三行：标题 + 时间（同一行）/ 正文 textarea / 按钮。
    ========================================================================== */
+/* 「今天 N 条待处理 · 逾期 M 条」—— 细卡片，不占太多高度（2026-11-10）。 */
+.dpcard.digest {
+  padding: 5px 8px;
+  background: rgba(245, 165, 36, 0.10);
+  border: 1px solid rgba(245, 165, 36, 0.28);
+}
+.dpcard.digest::after { display: none; }   /* 不要彩色竖条 */
+.dpdigest {
+  font-size: 10px;
+  line-height: 1.4;
+  color: rgba(245, 194, 107, 0.95);
+  text-align: center;
+}
+
 /* 日记卡片的左侧竖条：暖琥珀（和待办的青蓝、日程的粉蓝区分开）。 */
 .dpcard.diary::after { background: linear-gradient(to bottom, #f5c26b, #e8915a); }
 

@@ -38,6 +38,17 @@ struct DayPanelTodo: Equatable {
     var calendarIdentifier: String
 }
 
+/// 今天这一列的待办摘要（2026-11-10）：
+/// 「今天 N 条待处理 · 逾期 M 条」。
+struct DayPanelTodoDigest: Equatable {
+    /// 今天还没处理的条数。
+    var today: Int = 0
+    /// 今天**之前**（逾期）还没处理的条数。
+    var overdue: Int = 0
+
+    var isEmpty: Bool { today == 0 && overdue == 0 }
+}
+
 /// 「日期覆盖层」里的一条**日记**。
 ///
 /// 日记**不属于**提醒事项 / 系统日历：它存在本 app 自己的
@@ -95,6 +106,10 @@ struct DayPanelContent: Equatable {
     var events: [DayPanelEvent] = []
     /// 日记（**第三块内容**，和待办 / 日程并列；存在 app 自己的 diary.json 里）。
     var diary: [DayPanelDiary] = []
+    /// 这一列是不是「今天」（只有今天才显示待办摘要）。
+    var isToday: Bool = false
+    /// 今天 / 逾期的未处理条数（nil = 还没算出来 / 不是今天）。
+    var todoDigest: DayPanelTodoDigest? = nil
     /// 节日 / 节气信息（由农历模块提供）。
     var festival: DayPanelFestival = DayPanelFestival()
     /// 待办 / 日程是否**已经向 EventKit 查完并合并**（2026-11 加）。
@@ -206,6 +221,9 @@ extension DayPanelContent {
                 ] as [String: Any]
             },
             "diary": diary.map(\.jsonObject),
+            "isToday": isToday,
+            "todoDigest": todoDigest.map { ["today": $0.today, "overdue": $0.overdue] }
+                ?? NSNull(),
             "festival": DayPanelContent.festivalJSON(festival),
             // 待办 / 日程是否已查完（网页判断「要不要补发请求」用）。
             "ready": ready,

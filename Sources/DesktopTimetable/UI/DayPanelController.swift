@@ -1219,6 +1219,8 @@ final class DayPanelController {
         let token = contentToken
         let date = dayDate(day) ?? Date()
         content.day = day
+        content.isToday = (day == todayIndex)
+        content.todoDigest = nil   // 每次换天 / 重载都重新算
         // 7 天的「今日详情」**一次算好**（纯计算，很便宜）——
         // 算完存进 `festivalByDay`，push 时一起给网页。
         refreshFestivalCache()
@@ -1305,6 +1307,10 @@ final class DayPanelController {
             let hidden = Set(self.recentlyCompleted.keys)
                 .union(self.recentlyDeleted.keys)
             self.content.todos = Self.visibleTodos(updatedTodos, excluding: hidden)
+            // 今天这一列：算「今天 + 逾期」的未处理条数（2026-11-10）。
+            if day == self.todayIndex {
+                self.refreshTodoDigest(day: day)
+            }
             self.content.events = events
             // 待办 / 日程都查完并合并了 → 这一天才算「有完整数据」。
             self.content.ready = true
@@ -1671,6 +1677,20 @@ final class DayPanelController {
         }
     }
 
+
+    /// 今天这一列的待办摘要（今天 N 条 + 逾期 M 条）。
+    ///
+    /// 只在「正在显示的就是今天」时算并推送 —— 别的列不需要。
+    private func refreshTodoDigest(day: Int) {
+        let today = content.todos.count
+        let startOfToday = Calendar.current.startOfDay(for: Date())
+        eventStore.pendingReminders(before: startOfToday) { [weak self] overdue in
+            guard let self, self.currentDay == day, day == self.todayIndex else { return }
+            self.content.todoDigest = DayPanelTodoDigest(today: today, overdue: overdue)
+            self.pushState()
+        }
+    }
+
     /// 面板里显示的待办 = **未完成**的那些。
     ///
     /// 用户确认：完成的条目不再出现在面板里、也不算红点。
@@ -1964,6 +1984,13 @@ final class FakeEventKitStore: EventKitStoreProtocol {
     ///   · `todosByDate` 里有的 → **只**在那一天返回（精确匹配）；
     ///   · `todos`（老的扁平数组）→ 按 `dueMinutes` 相对**被问的那一天**算，
     ///     所以「每天 10:00 的待办」在每一天都显示（和真实实现一致）。
+    /// 自检注入：逾期未处理条数（`pendingReminders(before:)` 直接回这个）。
+    var overduePendingCount = 0
+
+    func pendingReminders(before date: Date, completion: @escaping (Int) -> Void) {
+        completion(overduePendingCount)
+    }
+
     func reminders(on date: Date, completion: @escaping ([DayPanelTodo]) -> Void) {
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = .current
@@ -2251,6 +2278,9 @@ final class EmptyEventKitStore: EventKitStoreProtocol {
     func reminderLists() -> [EventKitListInfo] { [] }
     func reminders(on date: Date, completion: @escaping ([DayPanelTodo]) -> Void) {
         completion(seededTodos)
+    }
+    func pendingReminders(before date: Date, completion: @escaping (Int) -> Void) {
+        completion(0)
     }
     func events(on date: Date, completion: @escaping ([DayPanelEvent]) -> Void) { completion([]) }
     func setReminder(_ identifier: String, in calendarIdentifier: String,

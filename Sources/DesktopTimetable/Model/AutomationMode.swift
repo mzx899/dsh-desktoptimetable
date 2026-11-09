@@ -42,6 +42,7 @@ enum AutomationMode {
         "--verify-settings-card",
         "--verify-data-buttons",
         "--verify-diary",
+        "--verify-todo-digest",
         "--shot-import-diff",
         "--verify-period-save",
         "--verify-lead-custom",

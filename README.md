@@ -63,7 +63,8 @@ click the gear to configure.
 - **日记**：日期覆盖层里和「待办事项 / 日历行程」并列的**第三块内容**
   （琥珀色竖条那张卡）。点「＋ 写日记」写标题 + 正文；点已有的一条进入编辑态，
   可以修改或删除。数据存在 `<数据目录>/diary.json`，**不进系统日历 / 提醒事项**；
-  在设置 →「日记」板块里可以集中管理（列表 / 新建 / 编辑 / 删除）。
+  在设置 →「日记」板块里可以集中管理（列表 / 新建 / 编辑 / 删除），
+  **删除进回收站（保留 30 天，可恢复 / 全部删除）**。
 - **已完成的提醒事项**：设置 → 提醒 →「日期覆盖层」卡片里的第三行，默认收起；
   点开就在卡片内展开，跨**所有清单**查看已完成项（每行带清单名），
   可搜索 / 按清单筛选、恢复为未完成、删除单条，或全部删除
@@ -899,7 +900,8 @@ Sources/DesktopTimetable/
 | `DesktopTimetable-1.3.3.app` | 1.3.3 | `com.desktoptimetable.app.v120` | 第三代上一版（放到最大不再被画布裁；卡片始终在画布正中），归档在 `版本迭代/` |
 | `DesktopTimetable-1.4.0.app` | 1.4.0 | `com.desktoptimetable.app.v120` | 第三代上一版（课表折叠 / 展开），归档在 `版本迭代/` |
 | `DesktopTimetable-1.4.1.app` | 1.4.1 | `com.desktoptimetable.app.v120` | 第三代上一版（折叠态缩放按顶边 / 展开不再被裁），归档在 `版本迭代/` |
-| `DesktopTimetable-1.5.2.app` | 1.5.2 | `com.desktoptimetable.app.v120` | 第三代，**最新源码版**（日记第二轮：落盘显示 / 右键删除 / 表头绿点 / 加号行收起），归档在 `版本迭代/` |
+| `DesktopTimetable-1.5.3.app` | 1.5.3 | `com.desktoptimetable.app.v120` | 第三代，**最新源码版**（日记回收站 / 今日待办摘要 / 悬停隔离 / 折叠锁列），归档在 `版本迭代/` |
+| `DesktopTimetable-1.5.2.app` | 1.5.2 | `com.desktoptimetable.app.v120` | 第三代上一版（日记第二轮：落盘显示 / 右键删除 / 表头绿点 / 加号行收起），归档在 `版本迭代/` |
 | `DesktopTimetable-1.5.1.app` | 1.5.1 | `com.desktoptimetable.app.v120` | 第三代上一版（日记四连修：保存即显示 / 按钮等宽 / 写日记锁列 / 首页 5 个板块），归档在 `版本迭代/` |
 | `DesktopTimetable-1.5.0.app` | 1.5.0 | `com.desktoptimetable.app.v120` | 第三代上一版（新增「日记」：日期覆盖层第三块 + 设置第 5 个板块），归档在 `版本迭代/` |
 | `DesktopTimetable-1.4.8.app` | 1.4.8 | `com.desktoptimetable.app.v120` | 第三代上一版（弹窗文案精简 / 选项卡铺满 / 课表数据按钮 / 合并差异页修复与玻璃化），归档在 `版本迭代/` |
@@ -980,6 +982,10 @@ WebKit 在 `pageZoom < 1` 时会按 9pt 最小逻辑字号把小字撑大，
 1.4.4 是 1.4.3 的**补丁版**：折叠之后点表头日期**保持折叠**、直接弹出日历 / 待办面板
 （面板挂在卡片上，从折叠条底下垂出来）；以前是「先展开课表再开面板」。
 回归入口：`--verify-collapse-panel`。
+
+1.5.3 是 1.5.2 的**补丁版**：日记**回收站**（删除进回收站、30 天内可恢复、可全部删除）、
+**今日待办摘要**（今天 / 逾期未处理条数，只对今天那一列显示）、
+鼠标在设置面板 / 弹窗上移动**不再驱动课表的日期覆盖层**、折叠态写日记时**锁住当前列**。
 
 1.5.2 是 1.5.1 的**补丁版**：日记第二轮 —— 收起 / 翻周之后日记**真的还在**
 （`loadContent` 里读取时机写反、读进来又被清掉）、表单里的「删除」改成**右键菜单**、
@@ -1085,7 +1091,8 @@ DesktopTimetable/
 │   ├── DesktopTimetable-1.4.8.app  ← 上一版（文案 / 选项卡 / 差异页）
 │   ├── DesktopTimetable-1.5.0.app  ← 上一版（新增日记）
 │   ├── DesktopTimetable-1.5.1.app  ← 上一版（日记四连修）
-│   └── DesktopTimetable-1.5.2.app  ← 最新构建（日记第二轮）
+│   ├── DesktopTimetable-1.5.2.app  ← 上一版（日记第二轮）
+│   └── DesktopTimetable-1.5.3.app  ← 最新构建（日记回收站 / 今日摘要 / 悬停隔离）
 ├── Sources/               ← 唯一源码，A/B 两种模式都在这里（日记：Model/DiaryStore.swift）
 ├── Resources/
 ├── Tests/
@@ -1110,7 +1117,7 @@ DesktopTimetable/
 └── README.md
 ```
 
-改完代码 `make install` 只更新**当前版**那个 App（`DesktopTimetable-1.5.2.app`，其中 `VERSION` 在 `Makefile` 里统一控制），
+改完代码 `make install` 只更新**当前版**那个 App（`DesktopTimetable-1.5.3.app`，其中 `VERSION` 在 `Makefile` 里统一控制），
 旁边的 1.0.0 / 1.0.1 / 1.1.2 保持原样不动；
 A 模式用 `make run-a` 或 `DT_SNAPSHOT=1` 启动，不再保留第三份 `.app`。
 

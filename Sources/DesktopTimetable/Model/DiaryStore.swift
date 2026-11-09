@@ -17,6 +17,11 @@ struct DiaryEntry: Codable, Equatable {
     var time: String
     /// 最后一次修改的时刻（排序 / 「最近写的」用）。
     var updatedAt: TimeInterval
+    /// 软删除时刻（nil = 还在）。
+    ///
+    /// 删除先进「最近删除」（保留 30 天），过期为自动清掉 ——
+    /// 用户要求「日记可以恢复，也可以全部删除」，时限 30 天。
+    var deletedAt: TimeInterval? = nil
 }
 
 /// 日记的读写（JSON 小文件，整体读写即可 —— 单条最多几百字，没到需要数据库的量级）。
@@ -57,7 +62,7 @@ final class DiaryStore {
 
     /// 加载全部条目（按日期倒序、同一天内按时间升序）。
     func all() -> [DiaryEntry] {
-        loadRaw().sorted { a, b in
+        loadRaw().filter { $0.deletedAt == nil }.sorted { a, b in
             if a.date != b.date { return a.date > b.date }
             let ta = a.time.isEmpty ? "99:99" : a.time
             let tb = b.time.isEmpty ? "99:99" : b.time
@@ -76,8 +81,22 @@ final class DiaryStore {
         }
     }
 
-    /// 一共几条（设置里显示数量用）。
-    func count() -> Int { loadRaw().count }
+    /// 一共几条（设置里显示数量用，只算未删除的）。
+    func count() -> Int { all().count }
+
+    /// 最近删除里还能恢复的那些（30 天内，最近的在前）。
+    func deletedEntries() -> [DiaryEntry] {
+        let limit = Date().timeIntervalSince1970 - Self.trashRetention
+        return loadRaw()
+            .filter { entry in
+                guard let at = entry.deletedAt else { return false }
+                return at >= limit
+            }
+            .sorted { ($0.deletedAt ?? 0) > ($1.deletedAt ?? 0) }
+    }
+
+    /// 回收站保留多久（秒）。30 天。
+    static let trashRetention: TimeInterval = 30 * 24 * 60 * 60
 
     // MARK: - 写
 
@@ -110,23 +129,68 @@ final class DiaryStore {
         return true
     }
 
+    /// 删除 = **软删除**（进「最近删除」，30 天内可恢复）。
     @discardableResult
     func delete(id: String) throws -> Bool {
         var items = loadRaw()
+        guard let idx = items.firstIndex(where: { $0.id == id && $0.deletedAt == nil }) else {
+            return false
+        }
+        items[idx].deletedAt = Date().timeIntervalSince1970
+        try save(items)
+        return true
+    }
+
+    /// 从「最近删除」里恢复。
+    @discardableResult
+    func restore(id: String) throws -> Bool {
+        var items = loadRaw()
+        guard let idx = items.firstIndex(where: { $0.id == id && $0.deletedAt != nil }) else {
+            return false
+        }
+        items[idx].deletedAt = nil
+        try save(items)
+        return true
+    }
+
+    /// 彻底删掉一条（「最近删除」里再删一次）。
+    @discardableResult
+    func deletePermanently(id: String) throws -> Bool {
+        var items = loadRaw()
         let before = items.count
-        items.removeAll { $0.id == id }
+        items.removeAll { $0.id == id && $0.deletedAt != nil }
         guard items.count != before else { return false }
         try save(items)
         return true
+    }
+
+    /// 清空「最近删除」。
+    @discardableResult
+    func emptyTrash() throws -> Int {
+        var items = loadRaw()
+        let before = items.count
+        items.removeAll { $0.deletedAt != nil }
+        try save(items)
+        return before - items.count
+    }
+
+    /// 过期清理：删掉 30 天以上的「最近删除」（读 / 写时顺手跑一次）。
+    private func purgeExpired(_ items: [DiaryEntry]) -> (items: [DiaryEntry], changed: Bool) {
+        let limit = Date().timeIntervalSince1970 - Self.trashRetention
+        let kept = items.filter { ($0.deletedAt ?? .greatestFiniteMagnitude) >= limit }
+        return (kept, kept.count != items.count)
     }
 
     /// 删除某一天的全部（日期覆盖层「清空这一天」用）。
     @discardableResult
     func deleteAll(on date: String) throws -> Int {
         var items = loadRaw()
-        let before = items.count
-        items.removeAll { $0.date == date }
-        let removed = before - items.count
+        let now = Date().timeIntervalSince1970
+        var removed = 0
+        for idx in items.indices where items[idx].date == date && items[idx].deletedAt == nil {
+            items[idx].deletedAt = now
+            removed += 1
+        }
         if removed > 0 { try save(items) }
         return removed
     }
@@ -143,7 +207,9 @@ final class DiaryStore {
         do {
             let data = try Data(contentsOf: fileURL)
             let shape = try JSONDecoder().decode(FileShape.self, from: data)
-            return shape.entries
+            let purged = purgeExpired(shape.entries)
+            if purged.changed { try? save(purged.items) }
+            return purged.items
         } catch {
             // 解析失败：**先备份再当空**，别让下一次写入把用户的内容覆盖掉。
             let stamp = Int(Date().timeIntervalSince1970)

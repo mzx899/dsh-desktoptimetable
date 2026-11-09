@@ -541,6 +541,13 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
     private var diaryScrollView: NSScrollView?
     private var diaryEditButton: NSButton?
     private var diaryDeleteButton: NSButton?
+    // 「已删除（保留 30 天）」
+    private var trashEntries: [DiaryEntry] = []
+    private var selectedTrashID: String?
+    private var trashListStack: NSStackView?
+    private var trashSummaryLabel: NSTextField!
+    private var trashRestoreButton: NSButton?
+    private var trashEmptyButton: NSButton?
 
     /// 课表集合变了（新建 / 重命名 / 删除 / 切换）—— 上层要立刻刷新桌面卡片。
     var onTimetablesChanged: (() -> Void)?
@@ -4290,6 +4297,58 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
         stack.addArrangedSubview(card)
         card.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
 
+        // ---- 「已删除（保留 30 天）」----
+        let trashCard = SettingsCard(title: "已删除（保留 30 天）")
+        trashSummaryLabel = makeLabel("", size: 11.5, color: NSColor.white.withAlphaComponent(0.55))
+        trashSummaryLabel.maximumNumberOfLines = 2
+        trashSummaryLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let trashStack = NSStackView()
+        trashStack.orientation = .vertical
+        trashStack.alignment = .leading
+        trashStack.spacing = 4
+        trashStack.translatesAutoresizingMaskIntoConstraints = false
+        trashListStack = trashStack
+
+        let trashScroll = NSScrollView()
+        trashScroll.hasVerticalScroller = true
+        trashScroll.autohidesScrollers = true
+        trashScroll.drawsBackground = false
+        trashScroll.borderType = .noBorder
+        trashScroll.translatesAutoresizingMaskIntoConstraints = false
+        let trashDoc = FlippedStackDocument()
+        trashDoc.translatesAutoresizingMaskIntoConstraints = false
+        trashDoc.addSubview(trashStack)
+        trashScroll.documentView = trashDoc
+        NSLayoutConstraint.activate([
+            trashDoc.leadingAnchor.constraint(equalTo: trashScroll.contentView.leadingAnchor),
+            trashDoc.topAnchor.constraint(equalTo: trashScroll.contentView.topAnchor),
+            trashDoc.widthAnchor.constraint(equalTo: trashScroll.contentView.widthAnchor),
+            trashStack.leadingAnchor.constraint(equalTo: trashDoc.leadingAnchor),
+            trashStack.trailingAnchor.constraint(equalTo: trashDoc.trailingAnchor),
+            trashStack.topAnchor.constraint(equalTo: trashDoc.topAnchor),
+            trashStack.bottomAnchor.constraint(equalTo: trashDoc.bottomAnchor),
+            trashScroll.heightAnchor.constraint(equalToConstant: 140),
+        ])
+
+        let restoreBtn = makeIconButton("恢复", symbol: "arrow.uturn.backward",
+                                        action: #selector(restoreDiaryFromTrash))
+        let emptyBtn = makeIconButton("全部删除", symbol: "trash",
+                                      action: #selector(emptyDiaryTrash))
+        trashRestoreButton = restoreBtn
+        trashEmptyButton = emptyBtn
+        let trashButtons = NSStackView(views: [restoreBtn, emptyBtn])
+        trashButtons.orientation = .horizontal
+        trashButtons.spacing = 8
+        trashButtons.alignment = .leading
+        trashButtons.translatesAutoresizingMaskIntoConstraints = false
+
+        trashCard.content.addArrangedSubview(trashSummaryLabel)
+        trashCard.content.addArrangedSubview(trashScroll)
+        trashCard.content.addArrangedSubview(trashButtons)
+        stack.addArrangedSubview(trashCard)
+        trashCard.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
         refreshDiaryList()
     }
 
@@ -4322,6 +4381,78 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
         }
         diaryEditButton?.isEnabled = selectedDiaryID != nil
         diaryDeleteButton?.isEnabled = selectedDiaryID != nil
+        refreshTrashList()
+    }
+
+    /// 重新读「最近删除」并重建列表。
+    private func refreshTrashList() {
+        guard let trashListStack else { return }
+        trashEntries = diaryStore.deletedEntries()
+        if let selected = selectedTrashID,
+           !trashEntries.contains(where: { $0.id == selected }) {
+            selectedTrashID = nil
+        }
+        let days = Int(DiaryStore.trashRetention / 86400)
+        trashSummaryLabel?.stringValue = trashEntries.isEmpty
+            ? "没有删除的日记。删掉的日记会在这里保留 \(days) 天，可以恢复。"
+            : "共 \(trashEntries.count) 篇，保留 \(days) 天；点一行选中，再点「恢复」或「全部删除」。"
+        for v in trashListStack.arrangedSubviews {
+            trashListStack.removeArrangedSubview(v)
+            v.removeFromSuperview()
+        }
+        for entry in trashEntries {
+            let row = DiaryRowView(entry: entry, selected: entry.id == selectedTrashID)
+            row.onSelect = { [weak self] in
+                guard let self else { return }
+                self.selectedTrashID = entry.id
+                self.refreshTrashList()
+            }
+            row.translatesAutoresizingMaskIntoConstraints = false
+            trashListStack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: trashListStack.widthAnchor).isActive = true
+            row.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        }
+        trashRestoreButton?.isEnabled = selectedTrashID != nil
+        trashEmptyButton?.isEnabled = !trashEntries.isEmpty
+    }
+
+    /// 从「最近删除」恢复。
+    @objc private func restoreDiaryFromTrash() {
+        guard let id = selectedTrashID else { return }
+        do {
+            try diaryStore.restore(id: id)
+            selectedTrashID = nil
+            refreshDiaryList()
+        } catch {
+            statusLabel.stringValue = "恢复日记失败：\(error.localizedDescription)"
+        }
+    }
+
+    /// 清空「最近删除」。≥50 条要输入「删除」确认（和已完成提醒事项同一套规矩）。
+    @objc private func emptyDiaryTrash() {
+        let count = trashEntries.count
+        guard count > 0 else { return }
+        if count >= 50 {
+            guard let input = TimetableNameDialog.run(
+                title: "删除全部已删除日记？",
+                message: "共 \(count) 条，删除后不可恢复。请输入「删除」两个字确认。",
+                name: "", subtitle: "", confirmTitle: "删除", showsSubtitle: false),
+                  input.name == "删除" else { return }
+        } else {
+            let outcome = AlertDialogController.show(.init(
+                severity: .destructive,
+                title: "删除全部已删除日记？",
+                message: "共 \(count) 条，删除后不可恢复。",
+                confirmTitle: "删除"))
+            guard case .confirmed = outcome else { return }
+        }
+        do {
+            _ = try diaryStore.emptyTrash()
+            selectedTrashID = nil
+            refreshDiaryList()
+        } catch {
+            statusLabel.stringValue = "清空失败：\(error.localizedDescription)"
+        }
     }
 
     @objc private func newDiaryEntry() {

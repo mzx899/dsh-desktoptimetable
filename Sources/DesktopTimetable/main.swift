@@ -500,6 +500,79 @@ if arguments.contains("--verify-settings-card") {
 }
 
 
+if arguments.contains("--verify-todo-digest") {
+    // 自检：今天那一列的待办摘要「今天 N 条待处理 · 逾期 M 条」（2026-11-10）。
+    guard let dataDir = ProcessInfo.processInfo.environment["DT_DATA_DIR"], !dataDir.isEmpty else {
+        print("❌ --verify-todo-digest 需要 DT_DATA_DIR（临时目录）")
+        exit(2)
+    }
+    print("数据目录：\(dataDir)")
+
+    final class EmptyWeather2: DayPanelWeatherProvider {
+        func weather(for coordinate: CLLocationCoordinate2D) -> DayPanelWeather? { nil }
+        func requestCurrentLocation(_ completion: @escaping (CLLocationCoordinate2D?) -> Void) {
+            completion(nil)
+        }
+    }
+
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+
+    var problems: [String] = []
+    let monday = WeekMath.mondayOfWeek(Date())
+    let fake = FakeEventKitStore()
+    fake.overduePendingCount = 3
+    // 今天（第 1 天）两条未处理。
+    fake.todosByDate[Calendar.current.startOfDay(for: monday)] = [
+        DayPanelTodo(title: "交报告", due: "18:00", done: false, dueMinutes: 1080,
+                     identifier: "d-1", calendarIdentifier: "c"),
+        DayPanelTodo(title: "买牛奶", due: "20:00", done: false, dueMinutes: 1200,
+                     identifier: "d-2", calendarIdentifier: "c"),
+        DayPanelTodo(title: "已经做完的", due: "09:00", done: true, dueMinutes: 540,
+                     identifier: "d-3", calendarIdentifier: "c"),
+    ]
+    var pushed: [[String: Any]] = []
+    let panel = DayPanelController(settings: DayPanelSettings(enabled: true),
+                                   festivalProvider: DayPanelFestivalProviderFactory.make(),
+                                   todayIndex: 1,
+                                   baseMonday: monday,
+                                   eventStore: fake,
+                                   weatherProvider: EmptyWeather2())
+    panel.onStateChange = { payload in
+        if let one = payload["dayPanel"] as? [String: Any] { pushed.append(one) }
+    }
+    panel.handle(action: "datePanelOpen", payload: ["day": 1])
+    for _ in 0..<40 { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+
+    let digest = pushed.last?["todoDigest"] as? [String: Any]
+    let isToday = pushed.last?["isToday"] as? Bool
+    print("  摘要：\(digest ?? [:]) isToday=\(isToday.map(String.init) ?? "nil")")
+    if isToday != true { problems.append("今天那一列 isToday 必须是 true") }
+    if (digest?["today"] as? NSNumber)?.intValue != 2 {
+        problems.append("今天待处理应为 2（已完成的不算）：\(digest?["today"] ?? "nil")")
+    }
+    if (digest?["overdue"] as? NSNumber)?.intValue != 3 {
+        problems.append("逾期应为 3：\(digest?["overdue"] ?? "nil")")
+    }
+
+    // 打开别的列：不该带摘要（也不该标 isToday）。
+    panel.handle(action: "datePanelOpen", payload: ["day": 3])
+    for _ in 0..<40 { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+    if (pushed.last?["isToday"] as? Bool) == true {
+        problems.append("第 3 天不该被标成今天")
+    }
+    if pushed.last?["todoDigest"] is [String: Any] {
+        problems.append("非今天那一列不该带待办摘要")
+    }
+
+    if problems.isEmpty {
+        print("✅ 今日待办摘要（今天 2 / 逾期 3 / 只对今天显示）：通过")
+        exit(0)
+    }
+    for p in problems { print("❌ \(p)") }
+    exit(1)
+}
+
 if arguments.contains("--verify-diary") {
     // 自检：日记的整条链路（2026-11-10 新增）。
     //
@@ -4605,6 +4678,15 @@ final class DelayedEventKitStore: EventKitStoreProtocol {
     func reminderLists() -> [EventKitListInfo] {
         [EventKitListInfo(title: "测试清单", identifier: "list-1", isWritable: true)]
     }
+    func pendingReminders(before date: Date, completion: @escaping (Int) -> Void) {
+        let limit = cal.startOfDay(for: date)
+        var count = 0
+        for (day, items) in todosByDate where day < limit {
+            count += items.filter { !$0.done }.count
+        }
+        completion(count)
+    }
+
     func reminders(on date: Date, completion: @escaping ([DayPanelTodo]) -> Void) {
         let key = cal.startOfDay(for: date)
         let items = todosByDate[key] ?? []
@@ -9983,6 +10065,68 @@ if let idx = arguments.firstIndex(of: "--shot-day-panel") {
 
     // 可选：**真的点一下待办前面的空心圆**，截「变蓝」和「正在淡出」两张图
 
+
+    // ---- 今日待办摘要：出图（2026-11-10）----
+    if arguments.contains("digest") {
+        func snapCards(_ path: String, _ tag: String) {
+            var rect: NSRect = renderer.webView.bounds
+            var raw: String?
+            renderer.evaluateForTest(
+                "(function(){var b=document.querySelector('.dpcards');" +
+                "if(!b)return '';var r=b.getBoundingClientRect();" +
+                "return JSON.stringify({x:r.left-8,y:r.top-8,w:r.width+16,h:r.height+16});})();"
+            ) { r in raw = r }
+            for _ in 0..<60 {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+                if raw != nil { break }
+            }
+            if let s = raw, let data = s.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Double],
+               let x = obj["x"], let y = obj["y"], let w = obj["w"], let h = obj["h"] {
+                rect = NSRect(x: x, y: renderer.webView.bounds.height - y - h, width: w, height: h)
+            }
+            var done = false
+            let cfg = WKSnapshotConfiguration()
+            cfg.rect = rect
+            renderer.webView.takeSnapshot(with: cfg) { image, _ in
+                defer { done = true }
+                guard let image, let tiff = image.tiffRepresentation,
+                      let rep = NSBitmapImageRep(data: tiff),
+                      let data = rep.representation(using: .png, properties: [:]) else { return }
+                try? data.write(to: URL(fileURLWithPath: path))
+                print("已截图 \(tag) → \(path) (\(rep.pixelsWide)x\(rep.pixelsHigh))")
+            }
+            for _ in 0..<120 {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+                if done { break }
+            }
+        }
+
+        let inject = """
+        (function () {
+          var fest = { lunar: '九月十二', term: '', festivals: [], weather: null, yi: '', ji: '' };
+          var festAll = {};
+          for (var d = 1; d <= 7; d++) festAll[String(d)] = fest;
+          var panel = { day: 3, isToday: true,
+            todoDigest: { today: 2, overdue: 3 },
+            todos: [
+              { title: '交报告', due: '18:00', done: false, identifier: 'g1', calendarIdentifier: 'c' },
+              { title: '买牛奶', due: '20:00', done: false, identifier: 'g2', calendarIdentifier: 'c' }
+            ],
+            events: [], diary: [], festival: fest };
+          window.ttUpdate({ dayPanel: panel, dayFestivals: festAll,
+            dayFlags: {}, courses: [], viewWeek: 2 });
+          window.ttDayPanelOpen(3, false);
+          return 'ok';
+        })();
+        """
+        renderer.evaluateForTest(inject) { r in print("注入摘要：\(r ?? "nil")") }
+        for _ in 0..<40 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+        let base = (out as NSString).deletingPathExtension
+        snapCards(base + "-digest.png", "今日待办摘要")
+        exit(0)
+    }
+
     // ---- 日记：出图（2026-11-10 新增）----
     //
     // 用法：`--shot-day-panel <out.png> diaryedit`
@@ -11382,6 +11526,15 @@ if arguments.contains("--verify-day-panel-click") {
               "原生推回来之后仍然只有一行（乐观条必须去重，实际 \(saved?["rows"] ?? "nil") 行）")
         check(rowText.contains("自检日记"), "列表行里要有刚写的标题（实际「\(rowText)」）")
         check(rowText.contains("正文第一行"), "列表行里要显示正文")
+        // ⚠️ 先等原生把这条真正写进文件（网页的乐观插入是立刻的，原生写盘是异步的）。
+        let fileStore = DiaryStore(directory: URL(fileURLWithPath:
+            ProcessInfo.processInfo.environment["DT_DATA_DIR"] ?? ""))
+        for _ in 0..<40 {
+            if fileStore.count() == 1 { break }
+            pause(0.1)
+        }
+        check(fileStore.count() == 1, "保存之后原生要把它写进 diary.json（实际 \(fileStore.count()) 条）")
+
         // ---- 右键菜单：修改… / 删除 / 取消（2026-11-10，面板太窄所以不放表单里）----
         let menuPost = eval("""
         (function () {
@@ -11403,29 +11556,47 @@ if arguments.contains("--verify-day-panel-click") {
         check((menuPost?["hasID"] as? Bool) == true, "右键菜单要带上日记 id")
 
         // 走原生菜单的「删除」动作（和 NSMenu 里点删除同一条路）。
+        //
+        // ⚠️ 用**原生真实 id**（`fileStore` 里那条）驱动：右键那一刻网页可能还拿着
+        // 乐观条（`local-…`），那属于测试时序、不是产品路径（用户隔几秒才右键）。
+        // 网页侧本身也有兜底：`resolveDiaryID` 会把本地 id 换成真实 id，换不到就排队。
+        let realDiaryID = fileStore.all().first?.id ?? ""
+        check(!realDiaryID.isEmpty, "应该能从 diary.json 读到那条日记的 id")
         let deleted = eval("""
         (function () {
-          var p = window.__ttLastPost;
-          if (!p || !p.payload || !p.payload.id) return JSON.stringify({ ok: false });
-          window.ttDiaryMenuAction('delete', { id: p.payload.id, day: p.payload.day });
+          if (!window.ttDiaryMenuAction) return JSON.stringify({ ok: false });
+          window.ttDiaryMenuAction('delete', { id: '\(realDiaryID)' });
           return JSON.stringify({ ok: true });
         })();
         """)
-        pause(0.8)
-        let afterDelete = eval("""
-        (function () {
-          var rows = document.querySelectorAll('.dpdiaryrow');
-          return JSON.stringify({ rows: rows.length });
-        })();
-        """)
+        pause(0.3)
+        // 等列表清空（最多 4 秒）。
+        var afterDelete: [String: Any]?
+        for _ in 0..<40 {
+            afterDelete = eval("""
+            (function () {
+              var rows = document.querySelectorAll('.dpdiaryrow');
+              return JSON.stringify({ rows: rows.length });
+            })();
+            """)
+            if (afterDelete?["rows"] as? NSNumber)?.intValue == 0 { break }
+            pause(0.1)
+        }
         print("[诊断] 右键删除后：\(afterDelete?.description ?? "nil")")
         check((deleted?["ok"] as? Bool) == true, "ttDiaryMenuAction('delete') 要能执行")
         check((afterDelete?["rows"] as? NSNumber)?.intValue == 0, "右键删除之后列表里不能还有那一行")
         let store = DiaryStore(directory: URL(fileURLWithPath:
             ProcessInfo.processInfo.environment["DT_DATA_DIR"] ?? ""))
-        if store.count() != 0 {
-            check(false, "右键删除之后 diary.json 里不能还有条目（实际 \(store.count()) 条）")
+        // ⚠️ 2026-11-10：删除改成**软删除**（进「最近删除」，30 天内可恢复）——
+        // 所以是「未删除的 0 条 + 回收站里 1 条」，不是文件里没有。
+        for _ in 0..<40 {
+            if store.count() == 0 { break }
+            pause(0.1)
         }
+        check(store.count() == 0,
+              "右键删除之后未删除的应该 0 条（实际 \(store.count()) 条）")
+        check(store.deletedEntries().count == 1,
+              "删掉的那条要进「最近删除」（实际 \(store.deletedEntries().count) 条）")
 
         let diaryFile = URL(fileURLWithPath: ProcessInfo.processInfo.environment["DT_DATA_DIR"] ?? "")
             .appendingPathComponent("diary.json")

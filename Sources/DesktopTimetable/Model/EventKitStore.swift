@@ -30,6 +30,11 @@ protocol EventKitStoreProtocol: AnyObject {
     func reminders(on date: Date, completion: @escaping ([DayPanelTodo]) -> Void)
     /// 某一天的日程。
     func events(on date: Date, completion: @escaping ([DayPanelEvent]) -> Void)
+    /// 截止到 `date`（当天零点）**之前**仍未处理的提醒事项**条数**。
+    ///
+    /// 用途：今天那一列的待办卡上写「今天 N 条待处理 · 逾期 M 条」。
+    /// 只回条数（不回内容）—— 逾期项可能散落在过去很多天，全量拉回来没必要。
+    func pendingReminders(before date: Date, completion: @escaping (Int) -> Void)
     /// 标记一条提醒事项的完成状态。
     func setReminder(_ identifier: String, in calendarIdentifier: String,
                      done: Bool, completion: @escaping (Bool) -> Void)
@@ -244,6 +249,23 @@ final class EventKitStore: EventKitStoreProtocol {
                 calendarIdentifier: event.calendar?.calendarIdentifier ?? "")
         }.sorted { $0.start < $1.start }
         DispatchQueue.main.async { completion(list) }
+    }
+
+    func pendingReminders(before date: Date, completion: @escaping (Int) -> Void) {
+        let cal = Self.gregorian
+        let limit = cal.startOfDay(for: date)
+        let lists = store.calendars(for: .reminder)
+        guard !lists.isEmpty else { completion(0); return }
+        let predicate = store.predicateForReminders(in: lists)
+        store.fetchReminders(matching: predicate) { fetched in
+            let count = (fetched ?? []).reduce(into: 0) { acc, reminder in
+                guard !reminder.isCompleted,
+                      let due = reminder.dueDateComponents?.date,
+                      due < limit else { return }
+                acc += 1
+            }
+            DispatchQueue.main.async { completion(count) }
+        }
     }
 
     // MARK: - 写

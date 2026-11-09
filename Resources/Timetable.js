@@ -270,6 +270,8 @@
     diaryForm: null,
     // 刚提交、还没等到原生推回来的日记（乐观插入，按标题 + 正文 + 时间去重）
     diaryPending: [],
+    // 在「还没拿到真实 id」时点了删除的本地条（等原生推回来再补发 diaryDelete）
+    diaryPendingDeletes: [],
     day: null,       // 当前显示的是哪一列（1…7），null = 没打开
     // ⚠️ **不再有「宽态」**（2026-11 去掉双击展开）——
     //
@@ -1550,6 +1552,15 @@
   // 待办块：**每条待办一张卡片** + 永远存在的「＋ 添加待办」幽灵卡。
   function dpTodoSection(data, day) {
     var todos = (data && data.todos) || [];
+    // 「今天 N 条待处理 · 逾期 M 条」（2026-11-10，仅今天那一列）。
+    var digest = (data && data.isToday && data.todoDigest) ? data.todoDigest : null;
+    var digestLine = null;
+    if (digest && ((digest.today || 0) + (digest.overdue || 0)) > 0) {
+      var parts = [];
+      if (digest.today > 0) parts.push('今天 ' + digest.today + ' 条待处理');
+      if (digest.overdue > 0) parts.push('逾期 ' + digest.overdue + ' 条');
+      digestLine = h('div', { class: 'dpdigest', text: parts.join(' · ') });
+    }
 
     // **已完成的不显示** —— 做完了的事不该还占着位置。
     //
@@ -1600,6 +1611,10 @@
     });
 
     var out = [];
+    // 摘要单独一张细卡片（仅今天、且有未处理 / 逾期时）。
+    if (digestLine) {
+      out.push(dpCard('digest', null, digestLine, { nodeKey: 'todo-digest' }));
+    }
     if (!open.length) {
       // 空状态：**一张低调的卡片**（没有彩色竖条）。
       // 分类不能整块消失 —— 用户要一眼看到「今天没有待办」这件事。
@@ -2274,6 +2289,16 @@
       return !hit;
     });
     DP.diaryPending = pending;
+    // 之前因为「还没拿到真实 id」排队的删除，现在数据到了 → 补发。
+    if ((DP.diaryPendingDeletes || []).length) {
+      var stillQueued = [];
+      DP.diaryPendingDeletes.forEach(function (localID) {
+        var real = resolveDiaryID(localID);
+        if (real) post('diaryDelete', { id: real, day: DP.day });
+        else stillQueued.push(localID);
+      });
+      DP.diaryPendingDeletes = stillQueued;
+    }
     if (pending.length) {
       items = items.filter(function (d) {
         return !pending.some(function (p) { return p.localEdit && p.id === d.id; });
@@ -3709,7 +3734,7 @@
     //
     // ⚠️ **编辑态同理**（2026-11）：右键「修改…」后要去点菜单里的「修改…」，
     // 指针必然离开卡片 —— 面板不能在这时候收走。
-    if (DP.open && !DP.adding && !DP.editingTodoKey) fadeOutPanel();
+    if (DP.open && !DP.adding && !DP.editingTodoKey && !DP.diaryForm) fadeOutPanel();
   }
 
   // ---- 时钟 / 状态条 ----
@@ -4708,11 +4733,45 @@
   // 日期覆盖层：暴露给原生的接口（契约见规格 8.3）
   // =====================================================================
 
+  /// 把「本地乐观条」的 id（`local-…`）解析成原生真实 id。
+  /// 解析不了（原生还没推回来）返回空串。
+  function resolveDiaryID(id) {
+    if (!id) return '';
+    if (String(id).indexOf('local-') !== 0) return id;
+    var data = panelDataFor(DP.day) || {};
+    var list = data.diary || [];
+    var pending = (DP.diaryPending || []).filter(function (x) { return x.id === id; })[0];
+    if (!pending) return '';
+    for (var i = 0; i < list.length; i++) {
+      var d = list[i];
+      if (String(d.id || '').indexOf('local-') === 0) continue;
+      if ((d.title || '') === (pending.title || '') &&
+          (d.body || '') === (pending.body || '') &&
+          (d.time || '') === (pending.time || '')) {
+        return d.id;
+      }
+    }
+    return '';
+  }
+
   /// 原生右键菜单选完之后回调（`修改…` / `删除`）。
   window.ttDiaryMenuAction = function (action, payload) {
     if (!payload || !payload.id) return;
     if (action === 'delete') {
-      post('diaryDelete', { id: payload.id, day: DP.day });
+      // ⚠️ 乐观插入的那条 id 是 `local-…`，原生不认识 ——
+      // 先按「标题 + 正文 + 时间」找到对应的**真实**条目再删（2026-11-10）。
+      var realID = resolveDiaryID(payload.id);
+      if (!realID) {
+        // 原生还没推回来 → 排个队，等数据到了再补发。
+        DP.diaryPendingDeletes = DP.diaryPendingDeletes || [];
+        DP.diaryPendingDeletes.push(payload.id);
+        DP.diaryPending = (DP.diaryPending || []).filter(function (p) {
+          return p.id !== payload.id;
+        });
+        renderPanel();
+        return;
+      }
+      post('diaryDelete', { id: realID, day: DP.day });
       // ⚠️ 本地也要**立刻**把这条从数据里摘掉（2026-11-10）：
       // `renderPanel` 有「内容没变就早退」的指纹，只删 pending 不改数据的话
       // 这一行会一直留在界面上（自检里就是「右键删除之后还有那一行」）。
