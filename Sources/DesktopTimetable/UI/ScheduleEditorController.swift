@@ -766,10 +766,11 @@ final class ScheduleEditorController: NSObject {
         let outcome = AlertDialogController.show(.init(
             severity: .destructive,
             title: "删除整门课程「\(c.name)」？",
-            message: "会删掉这门课的 \(count) 个上课时间记录。\n"
-                + "以后给这门课写的笔记会保留（变成孤立笔记）。\n\n"
-                + "「\(c.name)」的 \(count) 条上课时间记录将被删除，此操作不可撤销。",
-            confirmTitle: "删除整门课程",
+            message: "会删掉 \(count) 个上课时间记录，此操作不可撤销。\n"
+                + "笔记会保留（变成孤立笔记）。",
+            // 红色按钮就叫「删除」（2026-11-09 用户要求）——
+            // 标题已经说清「删除整门课程」，按钮上再重复一遍只会显得啰嗦。
+            confirmTitle: "删除",
             cancelTitle: "取消"))
         guard case .confirmed = outcome else { return }
 

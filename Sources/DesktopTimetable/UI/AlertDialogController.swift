@@ -747,6 +747,13 @@ final class AlertDialogController: NSObject, NSWindowDelegate {
             stack.addArrangedSubview(row)
             row.translatesAutoresizingMaskIntoConstraints = false
             row.heightAnchor.constraint(equalToConstant: h).isActive = true
+            // ⚠️ 宽度必须**钉死成整行内容宽**（2026-11-09 修）。
+            //
+            // 以前只给了 stack 的宽度、`alignment = .leading`，而 `DialogOptionRow`
+            // 是 `NSButton` —— 它的宽度取**标题文字的自然宽度**，
+            // 于是卡片比内容区窄一截、还左对齐：右边留白明显比左边多
+            // （用户：「为什么不处于窗口的中间位置，明显是右边留白更多，左边少」）。
+            row.widthAnchor.constraint(equalToConstant: width).isActive = true
         }
         let total = heights.reduce(0, +) + Metrics.optionGap * CGFloat(max(0, heights.count - 1))
         NSLayoutConstraint.activate([

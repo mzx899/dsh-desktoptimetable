@@ -244,6 +244,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         PermissionPromptWatch.onStateChanged = { [weak self] _ in
             self?.updateHover(force: true)
         }
+        installCancelEditingObserver()
         // 弹窗（设置面板 / 对话框 / 菜单）统一以**课表卡片中心**为锚点。
         WindowAnchor.provider = { [weak self] in
             guard let self, let window = self.window else { return .zero }
@@ -369,6 +370,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         PermissionPromptWatch.onStateChanged = { [weak self] _ in
             self?.updateHover(force: true)
         }
+        // 自检也要能验「Esc 取消」这条链路（和正式启动一样装上观察者）。
+        installCancelEditingObserver()
         mark("迁移数据前")
         AppPaths.migrateLegacyDataIfNeeded()
         reloadData()
@@ -651,6 +654,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 renderer.setPinImages(hollow: hollow, solid: solid)
             }
             renderer.setPinned(isPinned)
+            // ⚠️ **文本输入链路**（2026-11-08 修「添加待办打不了字」）。
+            //
+            // 桌面层窗口是 `.nonactivatingPanel`，永远拿不到 key → WKWebView 收不到按键。
+            // 网页里的输入框聚焦时发 `textInputFocus` → 这里把窗口临时切成
+            // 「能成为 key + first responder 交给 webView」，失焦 / 回车 / Esc 再还原。
+            // 重建 AppDelegate 时这条线整段丢了：输入框能点开、但一个字都打不进去。
+            window.textInputTarget = renderer.webView
+            renderer.onTextInputModeChanged = { [weak self] active in
+                guard let self else { return }
+                self.window?.setTextInputMode(active)
+                self.installTextInputKeyMonitor(active)
+            }
             window.acceptsMouseMovedEvents = true
             renderer.onSnapshot = { [weak self] image in
                 guard let self, let image else { return }
@@ -822,6 +837,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             interaction.onClick = { [weak self] point in
                 self?.forwardClickToCard(at: point)
             }
+            // 右键：网页里的 `contextmenu`（待办菜单 / 课程菜单）要靠这条线。
+            interaction.onRightClick = { [weak self] point in
+                guard let self, self.isLiveMode else { return }
+                self.webRenderer?.forwardContextMenu(at: point)
+            }
             interaction.pinButton.onToggle = { [weak self] pinned in
                 self?.setPinned(pinned)
             }
@@ -868,8 +888,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 否则翻到第 8 周点周三，覆盖层显示的却是别的周。
         let panelWeek = viewWeek ?? currentWeek() ?? 1
         let monday = Self.mondayOf(week: panelWeek, semesterStart: semesterStart)
+        // ⚠️ `--verify-todo-focus`：临时目录里 `dayPanel.enabled` 默认 false →
+        // `loadContent` 直接返回、根本不查待办 → 「输入时间时待办不能消失」
+        // 永远是 0 → 0（空转）。这里**只在内存里**打开开关（不写盘），
+        // 好让 `EmptyEventKitStore(seededTodos:)` 那条假待办真的显示出来（2026-11-09）。
+        var panelSettings = appSettings.dayPanel
+        if focusVerificationMode,
+           ProcessInfo.processInfo.environment["DT_FOCUS_REPORT"] != nil {
+            panelSettings.enabled = true
+        }
         let controller = DayPanelController(
-            settings: appSettings.dayPanel,
+            settings: panelSettings,
             festivalProvider: DayPanelFestivalProviderFactory.make(),
             todayIndex: WeekMath.todayIndex(Date()),
             baseMonday: monday)
@@ -959,6 +988,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window?.isPinned = pinned
         interaction?.setPinned(pinned)
         webRenderer?.setPinned(pinned)
+        // 顺便把完整状态再推一次：网页里那份 `pinned` 万一没收到刚才那次
+        // 单向调用，会在下一次渲染时被快照纠正过来。
+        webNeedsRefresh = true
+        refreshCard()
         saveWindowState()
         NSLog("[DesktopTimetable] 图钉切换：%@", pinned ? "已固定" : "已解锁")
     }
@@ -1009,10 +1042,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 自检用：切到固定 / 解锁（走和点图钉一样的路径）。
     /// 自检用：点一下**网页里**的图钉（视觉和点击都在网页层）。
     func testClickWebPin() {
-        webRenderer?.webView.evaluateJavaScript(
-            "var p = document.querySelector('.ttlpin'); if (p) p.click();",
-            completionHandler: nil)
-        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        let before = isPinned
+        // 用**和 `forwardClick` 完全一样**的派发方式：真实点击走的是
+        // `el.dispatchEvent(new MouseEvent('click', …))`，不是 `HTMLElement.click()`。
+        //
+        // ⚠️ 偶发失败：`evaluateJavaScript` 偶尔会被 WebKit 丢掉（不报错也不执行，
+        // 就是前几轮修过的那个「推了不执行」）。这里重试几次 —— 自检要的是
+        // 「这条链路通不通」，不是「第一次 eval 有没有被吞」。
+        let js = """
+        (function () {
+          var p = document.querySelector('.ttlpin');
+          if (p) p.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+          return 'ok';
+        })();
+        """
+        for attempt in 0..<3 {
+            webRenderer?.webView.evaluateJavaScript(js, completionHandler: nil)
+            let deadline = Date().addingTimeInterval(1.0)
+            while Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+                if isPinned != before { break }
+            }
+            if isPinned != before { break }
+            if attempt < 2 { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        if isPinned == before, ProcessInfo.processInfo.environment["DT_PIN_DIAG"] != nil {
+            var info = "nil"
+            webRenderer?.evaluateForTest("""
+            (function () {
+              var p = document.querySelector('.ttlpin');
+              var l = window.__ttLastPost;
+              if (p) { p.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); }
+              var l2 = window.__ttLastPost;
+              return JSON.stringify({ hasPin: !!p, src: p ? String(p.getAttribute('src') || '').length : -1,
+                                      cls: p ? p.className : '', last: l ? l.action : null,
+                                      afterDispatch: l2 ? l2.action : null,
+                                      connected: p ? p.isConnected : null,
+                                      n: document.querySelectorAll('.ttlpin').length });
+            })();
+            """) { info = $0 ?? "nil" }
+            for _ in 0..<80 {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+                if info != "nil" { break }
+            }
+            NSLog("[TT-PIN] 点网页图钉没变化：before=%d now=%d web=%@", before ? 1 : 0, isPinned ? 1 : 0, info)
+        }
     }
 
     func testSetPinned(_ pinned: Bool) {
@@ -1169,6 +1244,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if ProcessInfo.processInfo.environment["DT_DEBUG_INPUT"] != nil {
             NSLog("[DesktopTimetable] 收到网页意图 %@ payload=%@", action, String(describing: payload))
         }
+        // ⚠️ **待办右键菜单不归 DayPanelController**（2026-11-09 修「右键没菜单」）：
+        // 网页发的是 `todoMenu`，前缀 `todo*` 会被下面那条「交给 DayPanelController」
+        // 吞掉，而控制器不认这个动作 → 菜单永远出不来（用户：「右键删除恢复取消
+        // 是不是还没恢复」）。这里先截走，交给 App 自己弹 NSMenu。
+        if action == "todoMenu" {
+            handleTodoMenuIntent(payload)
+            return
+        }
         // 日期覆盖层的 intent（datePanelOpen / datePanelToggle / …）
         // 单独交给 DayPanelController 处理。
         if action.hasPrefix("datePanel") || action.hasPrefix("todo") {
@@ -1176,10 +1259,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         switch action {
+        case "textInputFocus":
+            // 网页里的输入框拿到焦点 → 进入文本输入模式（临时 key + first responder）。
+            if ProcessInfo.processInfo.environment["DT_DEBUG_INPUT"] != nil {
+                DiagLog.info("[TT-MODE] focus 请求进入（当前 active=\(webRenderer?.testTextInputActive ?? false)）")
+            }
+            webRenderer?.setTextInputMode(true)
+        case "textInputBlur":
+            if ProcessInfo.processInfo.environment["DT_DEBUG_INPUT"] != nil {
+                DiagLog.info("[TT-MODE] blur 请求退出（当前 active=\(webRenderer?.testTextInputActive ?? false)）")
+            }
+            webRenderer?.setTextInputMode(false)
+        case "panelRect":
+            handleWebPanelRect(payload)
         case "pinToggle":
             // 网页里图钉被点到（视觉和点击都在网页层，原生只切状态）。
-            let want = (payload as? [String: Any])?["pinned"] as? Bool ?? !isPinned
-            setPinned(want)
+            //
+            // ⚠️ **以原生为准，别信网页报的 `pinned`**（2026-11 修「点了没反应」）：
+            // 网页那份状态是异步同步的，万一没跟上，按 payload 设成同一个值
+            // 就等于「点了没反应」。这里无条件切一次，再把结果推回网页。
+            setPinned(!isPinned)
         case "week":
             let delta = (payload as? Int) ?? 0
             shiftViewWeek(by: delta)
@@ -1411,10 +1510,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 所以网页侧是用 `.tt-hover` 类手动模拟悬停态。
     private func syncLiveHover() {
         guard let renderer = webRenderer, renderer.liveMode, let window else { return }
-        let screen = NSEvent.mouseLocation
+        // 自检可以用 `testHoverProbe` 代替真实指针（否则断言取决于鼠标当时在哪）。
+        let screen = testHoverProbe?.pointer ?? NSEvent.mouseLocation
         // 屏幕坐标 → 窗口坐标
         let inWindow = window.convertPoint(fromScreen: screen)
-        guard TimetableLayout.cardRect.contains(inWindow) else {
+        // ⚠️ **日期覆盖层那一列也算「在课表上」**（2026-11 修「鼠标移到日历上日历就没了」）：
+        // 折叠时面板从卡片底下伸出来，指针一进面板就落到 cardRect 之外 ——
+        // 这里如果只认 cardRect，就会给网页发 clearLiveHover，
+        // 网页当作「指针离开课表」→ 把面板淡出（用户看到「日历直接消失」）。
+        let inPanel = dayPanelRectInWindow?.contains(inWindow) ?? false
+        guard TimetableLayout.cardRect.contains(inWindow) || inPanel else {
             renderer.clearLiveHover()
             return
         }
@@ -1465,6 +1570,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.refreshReminderSchedule()
         }
         settingsController.installHandlers()
+        // ⚠️ **把「日期覆盖层」控制器交给设置面板**（2026-11-08 修）。
+        //
+        // `buildDayPanelController()` 是在 `buildDesktopWindow()` 里调的，那时
+        // `settingsController` 还没建（本函数后建），所以那里那句
+        // `settingsController?.dayPanelController = controller` 是**空操作** ——
+        // 结果：设置里「日历与提醒事项接入」开关点了只改配置，
+        // `dayPanelController?.requestAccess()` 是 nil 调用 → **系统授权框永远不出来**，
+        // 状态行一直停在「正在读取」（用户：「点了接入待办事项…并没有弹出来窗口」）。
+        if let dayPanel {
+            settingsController.dayPanelController = dayPanel
+            settingsController.refreshDayPanelRows()
+        }
         // ⚠️ **设置面板「卡片大小」滑杆 → 桌面课表重排**（2026-11-08 修）。
         //
         // 重建 AppDelegate 时这条线断了：`onCardScaleChange` 只有声明、没有赋值，
@@ -2417,8 +2534,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let top = base.maxY
             let width = base.width
 
-            // 收起之前先把日期覆盖层收掉（网格没了，它也没地方站）。
-            if target > 0.5, from < 0.5 { closeDayPanel() }
+            // ⚠️ 折叠**不再收掉日期覆盖层**（2026-11）：网页里面板会从折叠条
+            // 底下伸出来（宿主从 `.grid` 换成 `.card`），收起时用户看到的是
+            // 「表头还在，日历跟着掉到下面」，而不是「面板突然没了」。
 
             if abs(from - target) < 0.0001 {
                 finishCollapse(target, left: left, top: top, width: width, openDay: openDay)
@@ -2579,6 +2697,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             inside = pointerInCard
         }
+        if ProcessInfo.processInfo.environment["DT_HOVER_DIAG"] != nil {
+            NSLog("[TT-HOVER] p=%@ card=%@ panel=%@ frame=%@ panelFrame=%@ collapse=%.2f inCard=%@ onPanel=%@ covered=%@ hover=%@ inside=%@",
+                  NSStringFromPoint(p),
+                  NSStringFromRect(TimetableLayout.cardRect),
+                  NSStringFromRect(dayPanelRectInWindow ?? .zero),
+                  NSStringFromRect(frame),
+                  panelFrame.map(NSStringFromRect) ?? "nil",
+                  TimetableLayout.collapse,
+                  pointerInCard ? "1" : "0",
+                  pointerOnPanel ? "1" : "0", coveredByOtherApp ? "1" : "0",
+                  hovering ? "1" : "0", inside ? "1" : "0")
+        }
         if inside != hovering || force {
             hovering = inside
             // 卡片之外不吃鼠标事件（桌面图标 / 下层窗口照常可点）。
@@ -2602,6 +2732,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // 覆盖层的数据会被下一次课表刷新冲掉。
             // 图钉固定状态：网页重建 DOM 时据此画对空心 / 实心。
             obj["pinned"] = isPinned
+            // 「取消添加 / 编辑」令牌（Esc）：网页看到号码变了就取消。
+            obj["cancelCompose"] = cancelComposeToken
             if let panel = dayPanel {
                 obj["dayPanel"] = panel.currentContentJSON()
                 obj["dayFlags"] = panel.currentFlagsJSON()
@@ -2855,6 +2987,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             commitCardScale()
         }
 
+    /// 「取消添加 / 编辑」的令牌：每次按 Esc 加一，随状态推给网页。
+    ///
+    /// ⚠️ 为什么不用一次性 `evaluateJavaScript`：键盘事件是在事件派发栈里
+    /// 触发的，那种「重入」的 eval 会被 WebKit 接受但不执行（实测 Esc 没反应）。
+    /// 状态推送是每轮都在用的通道，网页在 `ttUpdate` 里看到号码变了就取消。
+    private var cancelComposeToken = 0
+
+    /// 请求网页取消「添加 / 编辑待办」（走状态推送）。
+    private func requestCancelEditing() {
+        cancelComposeToken += 1
+        webNeedsRefresh = true
+        refreshCard()
+    }
+
+    /// 装「Esc 取消」通知的观察者（`DesktopWindow.cancelOperation` 会发）。
+    private var cancelEditingObserverInstalled = false
+    private func installCancelEditingObserver() {
+        guard !cancelEditingObserverInstalled else { return }
+        cancelEditingObserverInstalled = true
+        NotificationCenter.default.addObserver(forName: .ttCancelEditingRequested,
+                                               object: nil, queue: .main) { [weak self] _ in
+            self?.requestCancelEditing()
+        }
+    }
+
+    /// 自检用：直接走「Esc 取消」那条通知（等价于用户在输入时按 Esc）。
+    func testRequestCancelEditing() {
+        NotificationCenter.default.post(name: .ttCancelEditingRequested, object: nil)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+    }
+
+    /// 自检用：把课表摆到屏上（等价于正式启动时的 `showCard()`）。
+    ///
+    /// ⚠️ **焦点自检必须调它** —— 窗口没 `orderFrontRegardless()` 就摆不到屏上，
+    /// 也就永远拿不到 key window，那样测出来的「打不上字」是**假 bug**。
+    func testShowCard() {
+        showCard()
+    }
+
+    /// 文本输入期间的按键监视器（只拦 Esc）。
+    ///
+    /// ⚠️ 为什么需要它（2026-11-08 修「第二次打开要按两下 Esc」）：
+    /// 输入框的 Esc 走的是网页 `keydown`；可窗口每次重新变成 key 时，
+    /// **第一下按键有时会被 AppKit / WebKit 的输入上下文建立吃掉**，
+    /// 到不了 DOM。第二次打开输入框正好踩这个点 —— 用户就得按两下。
+    /// 这里在**原生**用 `addLocalMonitorForEvents` 先截住 Esc（它在 responder
+    /// 派发之前），直接调网页的 `ttCancelEditing()`，再也不看 DOM 收没收到。
+    private var textInputKeyMonitor: Any?
+
+    private func installTextInputKeyMonitor(_ active: Bool) {
+        if active {
+            guard textInputKeyMonitor == nil else { return }
+            textInputKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self else { return event }
+                if event.keyCode == 53 {        // Esc
+                    // ⚠️ **走状态推送，不走一次性 eval**：键盘事件在派发栈里，
+                    // 这里同步 eval 会被 WebKit 丢掉（重入）；单次 eval 也没重试。
+                    // 状态推送（`ttUpdate`）是每轮都在跑的通道，靠得住。
+                    DispatchQueue.main.async { [weak self] in self?.requestCancelEditing() }
+                    return nil
+                }
+                return event
+            }
+        } else if let monitor = textInputKeyMonitor {
+            NSEvent.removeMonitor(monitor)
+            textInputKeyMonitor = nil
+        }
+    }
+
+    /// 自检用：文本输入的 Esc 监视器装上了吗？
+    var testTextInputKeyMonitor: Bool { textInputKeyMonitor != nil }
+
+    /// 自检用：设置面板拿到「日期覆盖层」控制器了吗？
+    /// （没拿到 → 「接入」开关点了不弹系统授权框、状态行卡在「正在读取」。）
+    var testSettingsHasDayPanel: Bool { settingsController?.dayPanelController != nil }
+
     /// 自检用：设置面板当前是否开着。
     var testSettingsPanelVisible: Bool {
         settingsController?.window?.isVisible ?? false
@@ -2886,8 +3094,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var menuGraceUntil: Date = .distantPast
 
+    /// 网页报上来的「日期覆盖层实际矩形」（窗口坐标）。
+    ///
+    /// ⚠️ 为什么不用 `TimetableLayout.dayPanelRect`：那套几何只按展开态算，
+    /// 折叠 + 缩放 / 换宿主时和网页里的实际位置会差几个点 —— 差出去的缝
+    /// 就表现为「鼠标移到日历上，整个课表淡出」。
+    /// 网页每次 `positionPanel()` 都会把真实矩形报过来（`panelRect` 意图）。
+    private var webPanelRect: NSRect?
+    private var webPanelDay: Int?
+
+    /// 网页报来的面板矩形（CSS px，页面左上角原点）→ 窗口坐标。
+    ///
+    /// `getBoundingClientRect()` 给的是**视觉** CSS px；换算成窗口点：
+    ///   · x = css.x × 倍率；y 从底部往上量 = 窗口高 − (css.top + css.height) × 倍率。
+    /// 倍率用 `testRectScale`（pageZoom 档 = pageZoom，transform 档 = 1）。
+    private func handleWebPanelRect(_ payload: Any?) {
+        guard let dict = payload as? [String: Any],
+              (dict["open"] as? Bool) == true else {
+            webPanelRect = nil
+            webPanelDay = nil
+            return
+        }
+        guard let l = (dict["l"] as? NSNumber)?.doubleValue,
+              let t = (dict["t"] as? NSNumber)?.doubleValue,
+              let w = (dict["w"] as? NSNumber)?.doubleValue,
+              let h = (dict["h"] as? NSNumber)?.doubleValue,
+              w > 1, h > 1, let renderer = webRenderer else { return }
+        let k = Double(renderer.testRectScale)
+        let vh = Double(renderer.viewportHeight > 0
+                        ? renderer.viewportHeight
+                        : (window?.contentView?.bounds.height ?? 0))
+        webPanelRect = NSRect(x: l * k, y: vh - (t + h) * k, width: w * k, height: h * k)
+        webPanelDay = (dict["day"] as? NSNumber)?.intValue
+    }
+
     /// 日期覆盖层那一列的矩形（窗口坐标）；没开面板时 nil。
+    ///
+    /// 优先用**网页报来的真实矩形**（折叠 / 缩放 / 换宿主都不会错位），
+    /// 还没有报过（刚打开的那一两帧）才退回原生几何。
     private var dayPanelRectInWindow: NSRect? {
+        if let r = webPanelRect { return r }
         guard let day = dayPanel?.currentDay else { return nil }
         return TimetableLayout.dayPanelRect(day: day)
     }

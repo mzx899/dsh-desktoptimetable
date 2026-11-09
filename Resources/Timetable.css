@@ -73,6 +73,11 @@
 
    变实时用变实秒数：transition-duration 取「变化后」的计算样式，
    所以加 .solid 时生效 --tt-fade-in，去掉时回落到 --tt-fade-out。 */
+/* 折叠态：日期覆盖层要从卡片底下伸出来（折叠后点日期照样弹日历 + 待办）。
+ * 平时卡片 overflow:hidden 是为了裁掉四角的羽化层；折叠时只留表头一行，
+ * 面板是唯一的「越界」内容，放开它不影响卡片本身。 */
+.card.collapsed { overflow: visible; }
+
 .card.solid {
   opacity: var(--tt-max-opacity, 1);
   transition-duration: var(--tt-fade-in, 0.8s);
@@ -1343,9 +1348,12 @@
    * `word-break: normal` + `line-break: anywhere` 让它**优先在词边界断**，
    * 实在放不下（比如一整段没有空格的英文）才换行。
    */
-  word-break: normal;
+  /* ⚠️ **别在数字中间断行**（2026-11-09 修）：以前 `line-break: anywhere`
+     会把「00:00–23:59」断成「00:00–2 / 3:59」。keep-all + normal 之后只在
+     空格处换行，整段时间保持完整。 */
+  word-break: keep-all;
   overflow-wrap: break-word;
-  line-break: anywhere;
+  line-break: normal;
 }
 .dpcard.todo.done .dptitle {
   color: rgba(238, 241, 247, 0.36);

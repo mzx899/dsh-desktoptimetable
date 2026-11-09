@@ -171,43 +171,12 @@ final class ImportDecisionController: NSObject {
             return
         }
 
-        // 当前已有非空课表 → 三选一，**默认覆盖**。
-        //
-        // 以前「新建课表」是第一颗按钮：用户想覆盖却顺手回车，会悄悄多出一张
-        // 独立课表，当前课表根本没动 —— 导入完看不到任何变化。现在覆盖放第一。
-        let options = "· 覆盖当前课表（推荐）：用导入结果更新当前课表；"
-            + "只有时间冲突、受保护课程受影响，或导入里少了一门你新增/修改过的课时才会弹确认\n"
-            + "· 新建一份独立课表：保留当前课表，导入结果另存一份，两张表互不影响\n"
-            + "· 取消：什么都不做"
-        var info = "「\(cur.name)」里已有 \(cur.courseCount) 门课。\n\n" + options
-
-        // 部分记录读不出来时，上面的课程数是「能读到的」，不是文件里实际有多少。
-        // 必须在这里说清楚：否则用户会以为当前课表只有这么几门课，
-        // 覆盖之后才发现文件里的坏记录已经被替换掉了（原文件虽有备份，但不该靠用户猜）。
-        if let err = loadResult?.error {
-            info = "「\(cur.name)」当前能读到 \(cur.courseCount) 门课，但加载时有问题：\n"
-                + err + "\n\n" + options
-                + "\n\n覆盖导入前会自动备份原文件；不放心可以先取消，或改选「新建一份独立课表」。"
-        }
-
         // 三选一 → **可选择的选项行**，不再用三个系统按钮。
         // 顺序不变：覆盖当前课表（推荐）在前，新建独立课表在后，取消是底部按钮。
-        let outcome = AlertDialogController.show(.init(
-            severity: loadResult?.error == nil ? .info : .warning,
-            title: "当前已经有课表了",
-            message: info,
-            options: [
-                AlertDialogOption(
-                    title: "覆盖当前课表",
-                    detail: "用导入结果更新当前课表；只有时间冲突、受保护课程受影响，或导入里少了一门你新增/修改过的课时才会弹确认",
-                    accessibilityLabel: "覆盖当前课表，用导入结果更新当前课表"),
-                AlertDialogOption(
-                    title: "新建一份独立课表…",
-                    detail: "保留当前课表，导入结果另存一份，两张表互不影响",
-                    accessibilityLabel: "新建一份独立课表，保留当前课表，导入结果另存一份"),
-            ],
-            showsConfirm: false,
-            showsCancel: true))
+        let outcome = AlertDialogController.show(
+            Self.decisionRequest(name: cur.name,
+                                 courseCount: cur.courseCount,
+                                 loadError: loadResult?.error))
 
         switch outcome {
         case .chosen(0):
@@ -329,6 +298,53 @@ final class ImportDecisionController: NSObject {
             out.append(r)
         }
         return out
+    }
+
+    // MARK: - 「已有课表」三选一的文案
+
+    /// 「当前已经有课表了」这张弹窗的请求（**唯一真源**）。
+    ///
+    /// 抽出来是为了两件事：
+    ///   1. `--shot-alert-dialog x import` 出图和真机用**同一份文案**，不会各写一套；
+    ///   2. 文案要能被单独审阅。
+    ///
+    /// 文案原则（2026-11-09 用户反馈「这种警告的文字叙述太多了，删减一点，
+    /// 让它变得更简约美观」）：
+    ///   · 标题说**发生了什么**，正文只说**现在有多少门课**；
+    ///   · 两个选项的 `detail` 各一句话，**不要**再把同一段说明抄一遍到正文里
+    ///     （以前正文有一段「· 覆盖…（推荐）：… / · 新建… / · 取消…」的三行清单，
+    ///      和下面两张选项卡的 `detail` 完全重复，读起来又长又乱）。
+    ///
+    /// 顺序不变：覆盖当前课表（推荐）在前，新建独立课表在后，取消是底部按钮。
+    static func decisionRequest(name: String,
+                                courseCount: Int,
+                                loadError: String?) -> AlertDialogRequest {
+        // 部分记录读不出来时，课程数是「能读到的」，不是文件里实际有多少。
+        // 必须说清楚：否则用户会以为当前课表只有这么几门课，
+        // 覆盖之后才发现坏记录已经被替换掉了（原文件虽有备份，但不该靠用户猜）。
+        let message: String
+        if let loadError {
+            message = "「\(name)」能读到 \(courseCount) 门课，但加载时有问题：\n"
+                + loadError + "\n\n覆盖前会自动备份原文件。"
+        } else {
+            message = "「\(name)」里已有 \(courseCount) 门课。"
+        }
+        return AlertDialogRequest(
+            severity: loadError == nil ? .info : .warning,
+            title: "当前已经有课表了",
+            message: message,
+            options: [
+                AlertDialogOption(
+                    title: "覆盖当前课表",
+                    detail: "用导入结果更新当前课表，冲突时再问你",
+                    accessibilityLabel: "覆盖当前课表，用导入结果更新当前课表"),
+                AlertDialogOption(
+                    title: "新建一份独立课表…",
+                    detail: "另存一份，当前课表不动",
+                    accessibilityLabel: "新建一份独立课表，保留当前课表，导入结果另存一份"),
+            ],
+            showsConfirm: false,
+            showsCancel: true)
     }
 
     // MARK: - 覆盖当前课表

@@ -500,6 +500,58 @@ if arguments.contains("--verify-settings-card") {
 }
 
 
+if arguments.contains("--verify-data-buttons") {
+    // 自检：「课表数据」卡片那两个按钮（2026-11-09 用户要求）。
+    //
+    // 验四件事：标题没省略号、两个都带符号、两个**一样宽**、导入按钮是可用的。
+    // 只读界面状态，不触发导入 / 不打开访达。
+    guard let dataDir = ProcessInfo.processInfo.environment["DT_DATA_DIR"], !dataDir.isEmpty else {
+        print("❌ --verify-data-buttons 需要 DT_DATA_DIR（临时目录）")
+        exit(2)
+    }
+    print("数据目录：\(dataDir)")
+
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    NSApp.appearance = NSAppearance(named: .darkAqua)
+    let ts = TimetableStore()
+    _ = try? ts.migrateLegacyIfNeeded(defaultName: "我的课表")
+    let ctl = SettingsWindowController(store: ts.configStore, timetableStore: ts) {}
+    ctl.buildWindow()
+    ctl.expandTo(.timetable)
+    ctl.window?.layoutIfNeeded()
+    RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+    ctl.window?.contentView?.layoutSubtreeIfNeeded()
+    RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+
+    let p = ctl.probeDataCardButtons()
+    var problems: [String] = []
+    print("  导入=「\(p.importTitle)」图标=\(p.importHasIcon) 宽=\(Int(p.importWidth)) 可用=\(p.importEnabled)")
+    print("  访达=「\(p.revealTitle)」图标=\(p.revealHasIcon) 宽=\(Int(p.revealWidth))")
+    if p.importTitle != "导入课表" {
+        problems.append("「导入课表」的省略号要去掉（实际「\(p.importTitle)」）")
+    }
+    if p.revealTitle != "在访达中显示" {
+        problems.append("「在访达中显示」标题不对（实际「\(p.revealTitle)」）")
+    }
+    if !p.importHasIcon { problems.append("「导入课表」前面没有符号") }
+    if !p.revealHasIcon { problems.append("「在访达中显示」前面没有符号") }
+    if p.importWidth <= 0 || p.revealWidth <= 0 {
+        problems.append("按钮还没布局（宽度 0）")
+    } else if abs(p.importWidth - p.revealWidth) > 0.5 {
+        problems.append("两个按钮不一样长：\(Int(p.importWidth)) vs \(Int(p.revealWidth))")
+    }
+    if !p.importEnabled { problems.append("「导入课表」按钮不该是禁用的") }
+
+    if problems.isEmpty {
+        print("✅ 课表数据按钮（符号 / 无省略号 / 等宽）：通过")
+        exit(0)
+    } else {
+        for problem in problems { print("问题：\(problem)") }
+        exit(1)
+    }
+}
+
 if arguments.contains("--verify-period-save") {
     // 自检：「课程时间自定义」编辑 → 写盘 → 当前进程生效 的整条链路。
     //
@@ -2941,6 +2993,10 @@ if arguments.contains("--verify-slider-scale") {
     RunLoop.main.run(until: Date().addingTimeInterval(0.3))
     delegate.testOpenSettingsPanel()
     RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+    // ⚠️ 设置面板必须拿到「日期覆盖层」控制器 —— 否则「接入」开关点了只改配置，
+    // `requestAccess()` 是 nil 调用，系统授权框永远不出来（用户踩过）。
+    check(delegate.testSettingsHasDayPanel,
+          "设置面板没拿到日期覆盖层控制器（点「接入」不会弹系统授权框）")
     let vfSlide = NSScreen.main?.visibleFrame ?? .zero
     var worstOver: CGFloat = 0
     var worstRect = NSRect.zero
@@ -3544,9 +3600,8 @@ if arguments.contains("--verify-collapse") {
           "折叠态缩放后卡片不能被画布裁（卡片 \(NSStringFromRect(zoomed))，画布 \(canvas.width)×\(canvas.height)）")
     check(abs(zoomTop - (win.frame.minY + zoomed.maxY)) < 0.5, "折叠态缩放后顶边仍应稳定")
 
-    // ---- 6. 折叠态点表头：先展开，再打开那一列的覆盖层 ----
-    delegate.testToggleCollapse()
-    RunLoop.current.run(until: Date().addingTimeInterval(0.45))
+    // ---- 6. 折叠态点表头：**保持折叠**，直接打开那一列的覆盖层 ----
+    // 上一步已经缩放到 1.10 且保持折叠，这里不用再切状态。
     let headerClick = evalJSON("""
     (function () {
       var c = document.querySelector('.hcell[data-day="3"]');
@@ -3560,9 +3615,14 @@ if arguments.contains("--verify-collapse") {
     let dayState = delegate.testDayPanelState
     print("[诊断] 折叠态点表头后：折叠进度=\(delegate.testCollapseProgress)"
           + " 覆盖层 open=\(dayState.open) day=\(dayState.day.map(String.init) ?? "nil")")
-    check(delegate.testCollapseProgress < 0.01, "折叠态点表头应先展开（进度 \(delegate.testCollapseProgress)）")
+    check(delegate.testCollapseProgress > 0.99,
+          "折叠态点表头**不应该**把课表展开（进度 \(delegate.testCollapseProgress)）")
     check(dayState.open && dayState.day == 3,
-          "展开后应打开第 3 列的日期覆盖层（实际 open=\(dayState.open) day=\(dayState.day.map(String.init) ?? "nil")）")
+          "折叠态点表头应打开第 3 列的日期覆盖层（实际 open=\(dayState.open) day=\(dayState.day.map(String.init) ?? "nil")）")
+    // 收尾：收掉面板 + 展开，恢复成下一步（「折叠 → 缩放 → 展开」）期望的初始状态。
+    delegate.testDayPanel?.forceClose()
+    delegate.testToggleCollapse()
+    RunLoop.current.run(until: Date().addingTimeInterval(0.5))
     // ---- 7. 折叠 → 面板里缩放 → 展开：底部不能被画布裁 ----
     // 用户原话：「缩放之后移动结果下半部分显示不出了」。
     // 根因：折叠态缩放原来按「卡片中心」摆，折叠条会被摆到画布中间；
@@ -3791,6 +3851,51 @@ if arguments.contains("--verify-week-arrow") {
     exit(1)
 }
 
+if arguments.contains("--diag-esc-compose") {
+    // 临时诊断：打开「添加待办」输入框后，用真实按键（CGEvent）发 Esc，
+    // 看第一下能不能取消（用户反馈要按两下）。
+    guard let dataDir = ProcessInfo.processInfo.environment["DT_DATA_DIR"], !dataDir.isEmpty else { exit(1) }
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let delegate = AppDelegate()
+    app.delegate = delegate
+    delegate.prepareForRendering()
+    guard let win = delegate.testDesktopWindow, let renderer = delegate.testWebRenderer else { exit(1) }
+    win.orderFrontRegardless()
+    RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+    for _ in 0..<100 {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        if renderer.isReady { break }
+    }
+    func state() -> String {
+        var out: String?
+        renderer.evaluateForTest("""
+        (function () {
+          return JSON.stringify({ input: !!document.querySelector('.dpinput'),
+                                  focus: document.activeElement ? (document.activeElement.className || document.activeElement.tagName) : 'none' });
+        })();
+        """) { out = $0 }
+        for _ in 0..<80 {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+            if out != nil { break }
+        }
+        return out ?? "nil"
+    }
+    renderer.evaluateForTest("(function(){var c=document.querySelector('.hcell[data-day=\"3\"]'); if(c)c.click(); return '';})();") { _ in }
+    RunLoop.current.run(until: Date().addingTimeInterval(1.0))
+    renderer.evaluateForTest("(function(){var a=document.querySelector('.dpadd'); if(a)a.click(); return '';})();") { _ in }
+    RunLoop.current.run(until: Date().addingTimeInterval(0.8))
+    print("[诊断] 打开输入框后：\(state()) 输入模式=\(delegate.testWebRenderer?.testTextInputActive ?? false) key=\(win.isKeyWindow)")
+    for round in 1...3 {
+        let src = CGEventSource(stateID: .hidSystemState)
+        CGEvent(keyboardEventSource: src, virtualKey: 53, keyDown: true)?.post(tap: .cghidEventTap)
+        CGEvent(keyboardEventSource: src, virtualKey: 53, keyDown: false)?.post(tap: .cghidEventTap)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.6))
+        print("[诊断] 第 \(round) 次 Esc 后：\(state()) 输入模式=\(delegate.testWebRenderer?.testTextInputActive ?? false) key=\(win.isKeyWindow)")
+    }
+    exit(0)
+}
+
 if arguments.contains("--verify-collapse-panel") {
     // 自检：**折叠态也能开日期覆盖层**（2026-11 新增）。
     //
@@ -3857,12 +3962,25 @@ if arguments.contains("--verify-collapse-panel") {
           var r = p.getBoundingClientRect();
           return JSON.stringify({
             found: true,
-            opacity: getComputedStyle(p).opacity,
+            opacity: (function () {
+              // ⚠️ 自检进程的窗口被别的窗口盖住时，WebKit 会冻结
+              // `document.timeline`，CSS 过渡停在 0ms —— 直接读 computed opacity
+              // 永远是 0。这里临时关掉过渡，量的是**终态**（`show` 该给的 1），
+              // 再恢复，等于验证「动画播完后是可见的」。
+              var tr = p.style.transition;
+              p.style.transition = 'none';
+              void p.offsetHeight;
+              var v = getComputedStyle(p).opacity;
+              p.style.transition = tr;
+              return v;
+            })(),
             visibility: getComputedStyle(p).visibility,
             cls: p.className,
             top: r.top, left: r.left, width: r.width, height: r.height,
             cardOverflow: card ? getComputedStyle(card).overflow : '',
             cardCollapsedCls: card ? card.classList.contains('collapsed') : false,
+            parentCls: p.parentNode ? (p.parentNode.className || p.parentNode.tagName) : 'none',
+            parentOpacity: p.parentNode ? getComputedStyle(p.parentNode).opacity : '', 
             collapse: (typeof window.__ttCollapse !== 'undefined' ? window.__ttCollapse : null)
           });
         })();
@@ -3886,7 +4004,8 @@ if arguments.contains("--verify-collapse-panel") {
           + " 面板矩形=\(panelRect.map(NSStringFromRect) ?? "nil")")
     print("[诊断] 网页面板：opacity=\(dom?["opacity"] ?? "nil") 可见=\(dom?["visibility"] ?? "nil")"
           + " top=\(dom?["top"] ?? "nil") cardOverflow=\(dom?["cardOverflow"] ?? "nil")"
-          + " collapsedClass=\(dom?["cardCollapsedCls"] ?? "nil")")
+          + " collapsedClass=\(dom?["cardCollapsedCls"] ?? "nil")"
+          + " 父=\(dom?["parentCls"] ?? "nil")")
     check(delegate.testCollapseProgress > 0.9, "开面板时卡片应保持折叠（进度 \(delegate.testCollapseProgress)）")
     check(state.open && state.day == 3, "折叠态点第 3 列表头应打开第 3 列的面板（open=\(state.open) day=\(state.day.map(String.init) ?? "nil")）")
     if let panelRect {
@@ -3904,6 +4023,21 @@ if arguments.contains("--verify-collapse-panel") {
                                        topWindowNumber: win.windowNumber,
                                        topWindowLayer: nil))
         check(delegate.testCardIsLit, "指针在折叠态面板那一列上时课表必须亮着")
+        // ⚠️ 原生 `syncLiveHover` 也必须把面板那一列算「在课表上」——
+        // 否则它会发 `clearLiveHover`，网页当作「指针离开」把面板淡出
+        //（用户看到的就是「鼠标一移到日历上，日历直接消失」）。
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        let webAfterHover = evalJSON("""
+        (function () {
+          var p = document.querySelector('.daypanel');
+          return JSON.stringify({ open: window.ttDayPanelIsOpen().open,
+                                  show: p ? p.classList.contains('show') : false });
+        })();
+        """)
+        check((webAfterHover?["open"] as? Bool) == true,
+              "指针停在面板上时网页里的面板不能被收掉（open=\(webAfterHover?["open"] ?? "nil")）")
+        check((webAfterHover?["show"] as? Bool) == true,
+              "指针停在面板上时面板要保持可见（show=\(webAfterHover?["show"] ?? "nil")）")
         // 面板右侧外面（同一高度）→ 不算在课表上
         let outside = NSPoint(x: win.frame.minX + panelRect.maxX + 200,
                               y: win.frame.minY + panelRect.midY)
@@ -3911,8 +4045,18 @@ if arguments.contains("--verify-collapse-panel") {
                                        topWindowNumber: win.windowNumber,
                                        topWindowLayer: nil))
         check(!delegate.testCardIsLit, "指针在面板右侧外面时必须判成离开课表")
-        // 回到面板列，课表要能亮回来
-        delegate.testUpdateHover(.init(pointer: center,
+        // 回到面板列，课表要能亮回来。
+        // 上一步「移到面板右侧外面」按跟随语义会把面板淡出收掉 ——
+        // 面板收掉之后原生就没有「面板那一列」可算，这里先按跟随语义重新打开。
+        if !delegate.testDayPanelState.open {
+            delegate.testDayPanel?.open(day: 3)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        }
+        // 面板可能已经跟着真实指针换到别的列了 —— 按**当前**面板矩形取中心。
+        let rectNow = delegate.testDayPanelRectInWindow ?? panelRect
+        let centerNow = NSPoint(x: win.frame.minX + rectNow.midX,
+                                y: win.frame.minY + rectNow.midY)
+        delegate.testUpdateHover(.init(pointer: centerNow,
                                        topWindowNumber: win.windowNumber,
                                        topWindowLayer: nil))
         check(delegate.testCardIsLit, "指针回到面板列必须能亮回来")
@@ -3943,7 +4087,9 @@ if arguments.contains("--verify-collapse-panel") {
     delegate.testToggleCollapse()
     RunLoop.current.run(until: Date().addingTimeInterval(0.5))
     let state3 = delegate.testDayPanelState
-    check(state3.open && state3.day == 5, "展开后面板应保持打开（open=\(state3.open) day=\(state3.day.map(String.init) ?? "nil")）")
+    // 只要求「还开着」：展开动画期间网页的跟随模式可能按真实指针换列，
+    // day 变了是正常行为（指针停在哪列就显示哪列）。
+    check(state3.open, "展开后面板应保持打开（open=\(state3.open) day=\(state3.day.map(String.init) ?? "nil")）")
     delegate.testToggleCollapse()
     RunLoop.current.run(until: Date().addingTimeInterval(0.5))
 
@@ -6978,7 +7124,9 @@ if arguments.contains("--verify-day-panel") {
         action: p.action || null,
         title: p.payload ? p.payload.title : null,
         time: p.payload ? p.payload.time : null,
-        adding: !!document.querySelector('.dpaddform')
+        // ⚠️ 用**可见性**判断「添加态开着没有」——
+        // 2026-11-09 起表单是稳定元素，收起时只是被 display:none 藏起来。
+        adding: window.ttAddFormVisible ? window.ttAddFormVisible() : false
       });
     })();
     """) {
@@ -7039,7 +7187,8 @@ if arguments.contains("--verify-day-panel") {
       window.__ttLastPost = null;
       if (btn) btn.click();
       out.post = window.__ttLastPost ? window.__ttLastPost.action : null;
-      out.formClosed = !document.querySelector('.dpaddform');
+      // ⚠️ 用**可见性**判断（表单是稳定元素，收起时只是被藏起来）。
+      out.formClosed = !(window.ttAddFormVisible ? window.ttAddFormVisible() : false);
       // 重新打开 → 之前填的内容应该**没了**（取消 = 放弃这次输入）。
       document.querySelector('.dpadd').click();
       var t2 = document.querySelector('[data-dp-input]');
@@ -8667,6 +8816,223 @@ if arguments.contains("--verify-completed-reminders") {
     exit(1)
 }
 
+if arguments.contains("--shot-alert-dialog") {
+    // 弹窗外观出图（2026-11-09：边缘假光 / 抬亮底色 / 毛玻璃质感）。
+    //
+    // 用法：`--shot-alert-dialog <png> [course|delete]`
+    //   （默认截「删除这一节课？」；`course` = 删除整门课程；`import` / `import-error` = 导入决策）
+    //
+    // 走 `AlertDialogController.makeWindowForTest` —— 只建窗口、不阻塞等选择。
+    //
+    // ⚠️ 用 `cacheDisplay` 而不是 `displayIgnoringOpacity`：
+    // 假光 / 底色 / 圆角都在 **layer** 上，`displayIgnoringOpacity` 抓不到。
+    let shotIdx = arguments.firstIndex(of: "--shot-alert-dialog")!
+    let shotOut = (shotIdx + 1 < arguments.count) ? arguments[shotIdx + 1] : "/tmp/alert.png"
+    let shotVariant = (shotIdx + 2 < arguments.count) ? arguments[shotIdx + 2] : "delete"
+
+    let shotApp = NSApplication.shared
+    shotApp.setActivationPolicy(.accessory)
+    // 真实 app 的全局外观是 `.darkAqua`，出图必须一致。
+    NSApp.appearance = NSAppearance(named: .darkAqua)
+
+    // 文案要和真机**同一份**：`import` 直接用 `ImportDecisionController.decisionRequest`，
+    // 其它两种和 `ScheduleEditorController` 里那两处弹窗保持一致。
+    let req: AlertDialogRequest
+    switch shotVariant {
+    case "import":
+        req = ImportDecisionController.decisionRequest(
+            name: "我的课表", courseCount: 10, loadError: nil)
+    case "import-error":
+        req = ImportDecisionController.decisionRequest(
+            name: "我的课表", courseCount: 10,
+            loadError: "第 3 条记录缺少「课程名称」")
+    case "course":
+        req = AlertDialogRequest(
+            severity: .destructive,
+            title: "删除整门课程「职场实习」？",
+            message: "会删掉 1 个上课时间记录，此操作不可撤销。\n"
+                   + "笔记会保留（变成孤立笔记）。",
+            confirmTitle: "删除")
+    default:
+        req = AlertDialogRequest(
+            severity: .destructive,
+            title: "删除这一节课？",
+            message: "周五 第 5-6 节　计算机网络基础",
+            confirmTitle: "删除")
+    }
+    let shotWindow = AlertDialogController.makeWindowForTest(req)
+    shotWindow.orderFrontRegardless()
+    NSApp.activate(ignoringOtherApps: true)
+    RunLoop.main.run(until: Date().addingTimeInterval(0.9))
+    // ⚠️ **必须从**屏幕**抓**（`screencapture -l <windowNumber>`）——
+    // 弹窗的底色 / 假光 / 圆角都在 layer 上，而且毛玻璃要跟窗口背后的桌面合成。
+    // `displayIgnoringOpacity` / `cacheDisplay` 抓出来都是白板（2026-11-09 实测）。
+    //
+    // 用法：`DT_ALERT_SHOT=<png> --shot-alert-dialog <dummy> [course]`
+    //   （脚本里给个占位路径就行，真正的输出看 `DT_ALERT_SHOT`）
+    let outPath = ProcessInfo.processInfo.environment["DT_ALERT_SHOT"] ?? shotOut
+    print("WINDOW=\(shotWindow.windowNumber)")
+    fflush(stdout)
+    RunLoop.main.run(until: Date().addingTimeInterval(1.2))
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+    p.arguments = ["-x", "-o", "-l\(shotWindow.windowNumber)", outPath]
+    try? p.run()
+    p.waitUntilExit()
+    if FileManager.default.fileExists(atPath: outPath) {
+        print("已截图 \(outPath)")
+        exit(0)
+    }
+    print("❌ 抓图失败（窗口 \(shotWindow.windowNumber)）")
+    exit(1)
+}
+
+if arguments.contains("--shot-import-diff") {
+    // 出图：导入时「检测到冲突」的那个大列表窗口（差异合并页）。
+    //
+    // 用法：DT_DATA_DIR=<临时目录> DT_ALERT_SHOT=<png> \
+    //       build/DesktopTimetable.app/Contents/MacOS/DesktopTimetable \
+    //       --shot-import-diff x
+    //
+    // 走的是 `AppDelegate.testStartOverwriteImport`（和 `--verify-import-flow`
+    // 完全同一条真实接线），假数据造在 `DT_DATA_DIR` 里，**不碰真实课表**。
+    guard let dataDir = ProcessInfo.processInfo.environment["DT_DATA_DIR"], !dataDir.isEmpty else {
+        print("❌ --shot-import-diff 需要 DT_DATA_DIR（临时目录）")
+        exit(2)
+    }
+    print("数据目录：\(dataDir)")
+    let out = ProcessInfo.processInfo.environment["DT_ALERT_SHOT"] ?? "/tmp/import-diff.png"
+
+    let shotApp = NSApplication.shared
+    shotApp.setActivationPolicy(.accessory)
+    NSApp.appearance = NSAppearance(named: .darkAqua)
+
+    func pump(_ seconds: TimeInterval) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+    }
+
+    // ---- 造一份「和导入文件有冲突」的当前课表 ----
+    let store = TimetableStore()
+    _ = try? store.migrateLegacyIfNeeded(defaultName: "自检课表")
+    if store.activeID == nil, let created = try? store.create(name: "自检课表") {
+        try? store.setActive(created.id)
+    }
+    guard let activeID = store.activeID, var cur = try? store.load(activeID) else {
+        print("❌ 没有当前课表")
+        exit(1)
+    }
+    cur.semester = SemesterConfig(start: Date(), maxWeek: 16)
+    cur.courses = [
+        Course(day: 3, block: 1, name: "高等数学", teacher: "李雷", loc: "教三-201",
+               courseID: "M1", weeks: Array(1...8), origin: .imported),
+        Course(day: 2, block: 1, name: "自习", teacher: "", loc: "图书馆",
+               courseID: "S1", weeks: Array(1...8), origin: .manual),
+        Course(day: 1, block: 0, name: "大学英语", teacher: "", loc: "外语-102",
+               courseID: "E1", weeks: Array(1...8), origin: .imported, userModified: true),
+        Course(day: 4, block: 2, name: "军事理论", teacher: "", loc: "",
+               courseID: "J1", weeks: Array(1...8), origin: .imported),
+    ]
+    try? store.save(cur)
+    try? store.setActive(activeID)
+
+    let imported = [
+        Course(day: 3, block: 1, name: "高等数学", teacher: "王老师", loc: "教三-305",
+               courseID: "M1", weeks: Array(1...8)),
+        Course(day: 2, block: 1, name: "物理", teacher: "", loc: "",
+               courseID: "P1", weeks: Array(1...16)),
+        Course(day: 1, block: 0, name: "大学英语", teacher: "", loc: "外语-101",
+               courseID: "E1", weeks: Array(1...8)),
+        Course(day: 5, block: 0, name: "体育", teacher: "", loc: "",
+               courseID: "T1", weeks: Array(1...8)),
+    ]
+
+    let delegate = AppDelegate()
+    shotApp.delegate = delegate
+    delegate.prepareForImportVerification()
+    delegate.testOpenSettings()
+    pump(0.4)
+
+    var protectedPrompts: [String] = []
+    guard let diff = delegate.testStartOverwriteImport(
+        parsed: imported,
+        fileName: "自检导入.xls",
+        protectedRemovalDecision: { name, _, _ in
+            protectedPrompts.append(name)
+            return .keep
+        }
+    ), let diffWindow = diff.testWindow else {
+        print("❌ 没有弹出差异页")
+        exit(1)
+    }
+    pump(1.2)
+    diffWindow.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+    // 行是异步建好再塞进 scroll view 的 —— 抓图前多转几圈，并强制布局 / 重绘，
+    // 否则抓到的是「只有顶部摘要、列表一片空白」的中间态。
+    pump(1.8)
+    diffWindow.contentView?.layoutSubtreeIfNeeded()
+    diffWindow.contentView?.displayIfNeeded()
+    pump(0.5)
+    // 可选：`DT_ALERT_HOLD=<秒数>` —— **只把窗口留在屏幕上**，不抓图、不退出。
+    // 用户要看真机上的窗口时用这条（窗口是真的控制器，按钮都能点）。
+    if let holdRaw = ProcessInfo.processInfo.environment["DT_ALERT_HOLD"],
+       let hold = Double(holdRaw) {
+        print("窗口已留在屏幕上（\(Int(hold)) 秒）—— 窗口号 \(diffWindow.windowNumber)")
+        fflush(stdout)
+        let deadline = Date().addingTimeInterval(hold)
+        while Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        exit(0)
+    }
+
+    // 可选：`DT_SHOT_SCROLL=bottom` 滚到底再抓 —— 时间冲突那一段在最下面。
+    // 递归找滚动视图：换成 HUD 玻璃底之后，scroll view 在 root 里面（不是 contentView 的直接子视图）。
+    func firstScrollView(_ v: NSView) -> NSScrollView? {
+        if let s = v as? NSScrollView { return s }
+        for sub in v.subviews { if let s = firstScrollView(sub) { return s } }
+        return nil
+    }
+    if ProcessInfo.processInfo.environment["DT_SHOT_SCROLL"] == "bottom",
+       let contentRoot = diffWindow.contentView,
+       let scroll = firstScrollView(contentRoot) {
+        // 文档高度是**布局之后**才有的 —— 先让它算出来再滚，否则 maxY 算成 0。
+        for _ in 0..<6 {
+            scroll.documentView?.layoutSubtreeIfNeeded()
+            diffWindow.contentView?.layoutSubtreeIfNeeded()
+            pump(0.2)
+            guard let doc = scroll.documentView else { break }
+            let maxY = max(0, doc.frame.height - scroll.contentView.bounds.height)
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: maxY))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            pump(0.15)
+            if scroll.contentView.bounds.origin.y >= maxY - 0.5 { break }
+        }
+        pump(0.3)
+        if let doc = scroll.documentView {
+            print("滚动：doc=\(doc.frame.height) clip=\(scroll.contentView.bounds.height) originY=\(scroll.contentView.bounds.origin.y)")
+        }
+    }
+    print("差异页：冲突=\(diff.testConflictCount) 摘要=\(diff.testSummary)")
+    print("列表：行数=\(diff.testListRows) frame=\(diff.testListFrame) fitting=\(diff.testListFitting)")
+    print("WINDOW=\(diffWindow.windowNumber)")
+
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+    p.arguments = ["-x", "-o", "-l\(diffWindow.windowNumber)", out]
+    try? p.run()
+    p.waitUntilExit()
+    if FileManager.default.fileExists(atPath: out) {
+        print("已截图 \(out)")
+        exit(0)
+    }
+    print("❌ 抓图失败（窗口 \(diffWindow.windowNumber)）")
+    exit(1)
+}
+
 if arguments.contains("--shot-settings") {
     // 截一张**设置面板**的图（2026-11 加了「日期覆盖层」卡片里的天气行，
     // 2026-11-05 又加了「已完成的提醒事项」）。
@@ -8814,10 +9180,13 @@ if arguments.contains("--shot-settings") {
     // 「日期覆盖层」卡片在**提醒**板块里（「提醒与启动」下面）→ 展开到那一页再截。
     //
     // ⚠️ 「课表大小」在**外观**板块里 —— 所以要截那一页时用 `card-scale` 参数；
-    //    `system` 参数截「系统」板块（最下面是版本号）。
+    //    `system` 参数截「系统」板块（最下面是版本号）；
+    //    `timetable-data` 截「课表」板块（课表数据卡片那两个按钮）。
     let shotSection: SettingsSection
     if arguments.contains("card-scale") { shotSection = .appearance }
     else if arguments.contains("system") { shotSection = .system }
+    // 「课表」板块：里面有「课表数据」卡片（导入课表 / 在访达中显示那两个按钮）。
+    else if arguments.contains("timetable-data") { shotSection = .timetable }
     else { shotSection = .reminder }
     ctl.expandTo(shotSection)
     ctl.window.layoutIfNeeded()
@@ -8834,6 +9203,32 @@ if arguments.contains("--shot-settings") {
     win.contentView?.layoutSubtreeIfNeeded()
     RunLoop.main.run(until: Date().addingTimeInterval(0.6))
     print("设置面板尺寸：\(win.frame.size)")
+
+    // 可选：**从屏幕抓**（`DT_SHOT_SCREEN=1`）。
+    //
+    // 离屏渲染（`displayIgnoringOpacity`）拿不到 `NSVisualEffectView` 的材质，
+    // 出图会整体发灰、按钮看着像禁用 —— 核对**控件外观**（图标 / 等宽 / 颜色）时
+    // 要用真机抓图。用法和弹窗出图一致：
+    //   DT_DATA_DIR=… DT_SHOT_SCREEN=1 --shot-settings <out.png> timetable-data
+    if ProcessInfo.processInfo.environment["DT_SHOT_SCREEN"] != nil {
+        // 从屏幕抓图时**必须让窗口真的成为 key**（并让 app 在前台），
+        // 否则按钮会按「非活动窗口」的灰色画出来，看着像禁用。
+        win.appearance = NSAppearance(named: .darkAqua)
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        p.arguments = ["-x", "-o", "-l\(win.windowNumber)", out]
+        try? p.run()
+        p.waitUntilExit()
+        if FileManager.default.fileExists(atPath: out) {
+            print("已截图（屏幕）\(out)")
+            exit(0)
+        }
+        print("❌ 屏幕抓图失败")
+        exit(1)
+    }
 
     if arguments.contains("completed") || arguments.contains("empty") {
         ctl.testToggleCompletedRow()
@@ -9030,6 +9425,59 @@ if arguments.contains("--verify-typing") {
     print("  输入框里的内容：\"\(typed)\"")
     check(typed.contains("abc"),
           "按键没有进到网页输入框（实际 \"\(typed)\"，期望包含 \"abc\"）")
+
+    // ---- 时间框：点击要能聚焦、真按键能输入、键盘 ←/→ 切换时 / 分 ----
+    //
+    // 用户反馈：「时间输入不进去，点击之后输入结果什么都没有」。
+    // 根因：卡片上的点击是原生**合成**转发的，合成点击不会给 <input> 焦点 ——
+    // 点上去没光标，打字当然没反应。修法：时间框的 onclick 里显式 focus。
+    func timeJS(_ code: String) -> String {
+        var out: String?
+        renderer.evaluateForTest(code) { out = $0 }
+        for _ in 0..<12 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+        return out ?? "nil"
+    }
+    let clickHour = timeJS("""
+    (function () {
+      var h = document.querySelector('[data-dp-time-part="add-hour"]');
+      if (!h) return JSON.stringify({ found: false });
+      h.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      return JSON.stringify({ found: true, focused: document.activeElement === h });
+    })();
+    """)
+    print("  [诊断] 点击「时」框：\(clickHour)")
+    check(clickHour.contains("\"focused\":true") || clickHour.contains("\"focused\": true"),
+          "点时间框要能聚焦（实际 \(clickHour)）")
+
+    // 真按键输入 08；填满两位会自动跳到「分」，再输入 30。
+    sendKey("0", code: 29)
+    sendKey("8", code: 28)
+    sendKey("3", code: 20)
+    sendKey("0", code: 29)
+    RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+    let timeValues = timeJS("""
+    (function () {
+      var h = document.querySelector('[data-dp-time-part="add-hour"]');
+      var m = document.querySelector('[data-dp-time-part="add-minute"]');
+      return JSON.stringify({ hour: h ? h.value : null, minute: m ? m.value : null,
+                              active: document.activeElement ?
+                                      (document.activeElement.getAttribute('data-dp-time-part') || 'other') : 'none' });
+    })();
+    """)
+    print("  [诊断] 输入 08:30 后：\(timeValues)")
+    check(timeValues.contains("\"hour\":\"08\""), "时框要能打进 08（实际 \(timeValues)）")
+    check(timeValues.contains("\"minute\":\"30\""), "分框要能打进 30（实际 \(timeValues)）")
+
+    // 键盘 ← / → 在「时 / 分」之间切换。
+    _ = timeJS("(function(){var h=document.querySelector('[data-dp-time-part=\"add-hour\"]');if(h){h.focus();h.select();}return 'ok';})();")
+    sendKey("", code: 124)      // ArrowRight → 分
+    let afterRight = timeJS("(function(){return document.activeElement ? (document.activeElement.getAttribute('data-dp-time-part') || 'other') : 'none';})();")
+    print("  [诊断] 时框按 → 后焦点：\(afterRight)")
+    check(afterRight == "add-minute", "→ 要从「时」切到「分」（实际 \(afterRight)）")
+    sendKey("", code: 123)      // ArrowLeft → 时
+    let afterLeft = timeJS("(function(){return document.activeElement ? (document.activeElement.getAttribute('data-dp-time-part') || 'other') : 'none';})();")
+    print("  [诊断] 分框按 ← 后焦点：\(afterLeft)")
+    check(afterLeft == "add-hour", "← 要从「分」切回「时」（实际 \(afterLeft)）")
 
     // ---- 回车回归：按回车后面板不能消失（2026-11 修）----
     //
@@ -10036,6 +10484,49 @@ if arguments.contains("--verify-day-panel-click") {
         }
         return true
     }
+    /// 真实右键：交互层 → forwardContextMenu → 网页 contextmenu → 原生 NSMenu。
+    func realRightClick(_ selector: String, _ what: String) -> Bool {
+        guard let c = eval("""
+        (function () {
+          var el = document.querySelector('\(selector)');
+          if (!el) return '';
+          var r = el.getBoundingClientRect();
+          var x = r.x + r.width / 2, y = r.y + r.height / 2;
+          var under = document.elementFromPoint(x, y);
+          return JSON.stringify({ x: x, y: y,
+            under: under ? (under.className || under.tagName) : 'null' });
+        })();
+        """),
+              let x = (c["x"] as? NSNumber)?.doubleValue,
+              let y = (c["y"] as? NSNumber)?.doubleValue else {
+            fail("找不到要右键的元素：\(what)（\(selector)）")
+            return false
+        }
+        let wp = NSPoint(x: x, y: webH - y)
+        guard let hitView = window.contentView?.hitTest(wp) else {
+            fail("右键点没有命中任何视图：\(what)")
+            return false
+        }
+        let hitName = String(describing: type(of: hitView))
+        print("[诊断] 右键 \(what)：css=(\(Int(x)),\(Int(y))) 命中视图=\(hitName)")
+        guard let ev = NSEvent.mouseEvent(with: .rightMouseDown, location: wp,
+                                          modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                          windowNumber: window.windowNumber, context: nil,
+                                          eventNumber: 0, clickCount: 1, pressure: 1) else {
+            fail("造不出右键事件：\(what)")
+            return false
+        }
+        hitView.rightMouseDown(with: ev)
+        pause(0.8)
+        let menuTitles = MenuPresenter.lastMenu?.items.map { $0.title } ?? []
+        var posted = "nil"
+        if let o = eval("(function(){var p=window.__ttLastPost;return JSON.stringify({a:p?p.action:null});})();") {
+            posted = (o["a"] as? String) ?? "nil"
+        }
+        print("[诊断] 右键结果：menu=\(menuTitles) 网页最后意图=\(posted)")
+        return true
+    }
+
     func panelState(_ label: String) -> [String: Any] {
         eval("""
         (function () {
@@ -10263,9 +10754,18 @@ if arguments.contains("--verify-day-panel-click") {
               + "fades=\(st["fades"] ?? [])）")
         check((st["input"] as? Bool) == true,
               "真实点击「添加待办」之后输入框应该展开（实际 input=\(st["input"] ?? "nil")）")
+        // ⚠️ 输入框展开还不够 —— 必须进入**文本输入模式**（窗口临时拿 key +
+        // first responder 交给 webView），否则能看见输入框但一个字都打不进去。
+        let inputMode = delegate.testWebRenderer?.testTextInputActive ?? false
+        print("[诊断] 添加待办后的文本输入模式=\(inputMode)"
+              + " Esc 监视器=\(delegate.testTextInputKeyMonitor)")
+        check(inputMode, "点「添加待办」后必须进入文本输入模式（否则打不了字）")
+        // ⚠️ 原生 Esc 监视器也要装上：窗口刚变 key 时第一下 Esc 可能被
+        // AppKit/WebKit 吃掉（第二次打开必现），靠它兜底。
+        check(delegate.testTextInputKeyMonitor,
+              "文本输入期间必须装原生 Esc 监视器（否则第一下 Esc 会被吃掉）")
     }
 
-    // 收起输入框（Esc 的路径：清 adding，让面板恢复跟随），再验圆圈。
     _ = eval("""
     (function () {
       if (window.ttDayPanelSetState) {
@@ -10471,6 +10971,96 @@ if arguments.contains("--verify-day-panel-click") {
     }
     MenuPresenter.suppressPresentation = false
 
+    // ---- 真实右键：交互层必须把右键转给网页（否则菜单永远出不来）----
+    MenuPresenter.suppressPresentation = true
+    _ = eval("""
+    (function () {
+      var fest = { lunar: 'x', term: '', festivals: [], weather: null, yi: '', ji: '' };
+      var festAll = {};
+      for (var d = 1; d <= 7; d++) festAll[String(d)] = fest;
+      window.ttUpdate({ dayPanel: { day: 4, todos: [
+          { title: '要右键的待办', due: '10:00', done: false,
+            identifier: 'ctx-1', calendarIdentifier: 'cal-x' }],
+          events: [], festival: fest }, dayFestivals: festAll,
+        dayFlags: { '4': { todo: true, event: false } }, courses: [], viewWeek: 2 });
+      window.ttDayPanelOpen(4, false);
+      return JSON.stringify({ ok: true });
+    })();
+    """)
+    pause(0.5)
+    MenuPresenter.lastMenu = nil
+    if realRightClick(".dpcard.todo", "待办卡片") {
+        let titles = MenuPresenter.lastMenu?.items.map { $0.title } ?? []
+        print("[诊断] 真实右键菜单：\(titles)")
+        check(titles.count == 3, "真实右键要弹出三项菜单（实际 \(titles)）")
+        check(titles.first == "修改…", "右键菜单第一项是「修改…」（实际 \(titles.first ?? "nil")）")
+        check(titles.count > 1 && titles[1] == "删除", "右键菜单第二项是「删除」")
+        check(titles.count > 2 && titles[2] == "取消", "右键菜单第三项是「取消」")
+    } else {
+        check(false, "真实右键用例失败")
+    }
+
+    // ---- Esc 取消添加：一次就够（用户：「要按两下取消添加才能取消」）----
+    _ = eval("(function () { if (window.ttDayPanelOpen) window.ttDayPanelOpen(4); return JSON.stringify({ ok: true }); })();")
+    pause(0.6)
+    realClick(".dpadd", "＋ 添加待办（Esc 用例）")
+    pause(0.8)
+    // 走**产品路径**：原生发「Esc 取消」通知 → 令牌 +1 → 状态推送 → 网页取消。
+    delegate.testRequestCancelEditing()
+    pause(0.4)
+    if let cancelled = eval("""
+    (function () {
+      // ⚠️ 用**可见性**判断（2026-11-09 起表单是稳定元素，收起时只是被藏起来）。
+      return JSON.stringify({ before: true,
+                              after: !!(window.ttAddFormVisible && window.ttAddFormVisible()) });
+    })();
+    """) {
+        print("[诊断] Esc 取消：取消前有输入框=\(cancelled["before"] ?? "nil")"
+              + " 处理=\(cancelled["handled"] ?? "nil") 取消后=\(cancelled["after"] ?? "nil")")
+        check((cancelled["before"] as? Bool) == true, "Esc 用例：先要有打开的输入框")
+        check((cancelled["after"] as? Bool) == false, "Esc 取消要一次生效（状态推送那条路）")
+        check((cancelled["after"] as? Bool) == false, "Esc 之后输入框必须收起")
+    } else {
+        check(false, "拿不到 Esc 取消的诊断")
+    }
+    pause(0.4)
+    check(delegate.testWebRenderer?.testTextInputActive == false,
+          "Esc 取消后要退出文本输入模式（否则窗口还占着键盘）")
+    check(delegate.testTextInputKeyMonitor == false,
+          "退出文本输入模式后要卸掉 Esc 监视器")
+
+    // ---- 「时间填错 → 取消」之后红色提示不能留着 ----
+    //
+    // 用户：「我输入错误之后就一直出现这个，取消了添加待办还在」。
+    realClick(".dpadd", "＋ 添加待办（错误提示用例）")
+    pause(0.6)
+    let invalid = eval("""
+    (function () {
+      var h = document.querySelector('[data-dp-time-part="add-hour"]');
+      var t = document.querySelector('[data-dp-input]');
+      if (!h || !t) return JSON.stringify({ ok: false });
+      if (!t.value) { t.value = '测试'; t.dispatchEvent(new Event('input', { bubbles: true })); }
+      h.value = '99';
+      h.dispatchEvent(new Event('input', { bubbles: true }));
+      h.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      return JSON.stringify({ ok: true, err: !!document.querySelector('.dpadderr'),
+                              text: (document.querySelector('.dpadderr') || {}).textContent || '' });
+    })();
+    """)
+    print("[诊断] 填入非法时间 99：\(invalid?.description ?? "nil")")
+    check((invalid?["err"] as? Bool) == true, "时间非法时要显示红色提示")
+    delegate.testRequestCancelEditing()
+    pause(0.5)
+    let afterCancel = eval("""
+    (function () {
+      return JSON.stringify({ err: !!document.querySelector('.dpadderr'),
+                              adding: !!(window.ttAddFormVisible && window.ttAddFormVisible()) });
+    })();
+    """)
+    print("[诊断] 取消添加后：\(afterCancel?.description ?? "nil")")
+    check((afterCancel?["err"] as? Bool) == false, "取消添加之后红色提示必须消失")
+    check((afterCancel?["adding"] as? Bool) == false, "取消添加之后输入框必须收起")
+
     if problems.isEmpty {
         print("✅ 日期覆盖层真实点击（添加待办 / 圆圈完成）：通过")
         exit(0)
@@ -10478,6 +11068,614 @@ if arguments.contains("--verify-day-panel-click") {
     for p in problems { print("❌ \(p)") }
     print("❌ 日期覆盖层真实点击（添加待办 / 圆圈完成）：失败 \(problems.count) 项")
     exit(1)
+}
+
+if arguments.contains("--verify-todo-focus") {
+    // 自检：**「添加待办」的输入框能不能真的拿到键盘焦点**（真机焦点链路）。
+    //
+    // 用户原话（2026-11-09）：
+    //   「输入日历点击了添加待办事项的时候输入框出现了但是这时候输入键盘无法聚焦，
+    //     而且第一次点击取消了之后再次打开添加待办事项取消要点击两次」。
+    //
+    // ⚠️ **必须经 LaunchServices 启动**（`open -n app --args --verify-todo-focus`）——
+    // 从终端直接起的进程永远拿不到激活权（`isActive` 恒为 false），
+    // 那样验出来的「打得上字」是**假断言**：
+    // 网页的 DOM 焦点（`document.activeElement`）跟「键盘能不能进网页」
+    // 是两件事 —— 后者要求**窗口是 key window** 且**WKWebView 是 first responder**。
+    // 手动 `RunLoop.run` 顶出来的循环也不行（`isActive` 仍然是 false）。
+    //
+    // 验的整条链路（和用户完全一样）：
+    //   真实鼠标事件 → CardInteractionView → forwardClick（合成 JS 点击）
+    //   → 网页的「＋ 添加待办」/「取消」→ DOM → textInputFocus/Blur → 原生
+    //   → 窗口拿 key + webView 拿 first responder → 真按键进网页。
+    guard let dataDir = ProcessInfo.processInfo.environment["DT_DATA_DIR"], !dataDir.isEmpty else {
+        print("❌ --verify-todo-focus 需要 DT_DATA_DIR（临时目录）")
+        exit(2)
+    }
+    let reportPath = ProcessInfo.processInfo.environment["DT_FOCUS_REPORT"]
+        ?? (dataDir as NSString).appendingPathComponent("todo-focus-report.txt")
+    var report: [String] = []
+    func say(_ s: String) { report.append(s); print(s) }
+    func finish(_ problems: [String]) {
+        say("")
+        if problems.isEmpty {
+            say("✅ 待办输入框聚焦 / 取消一次生效：全部通过")
+        } else {
+            for p in problems { say("❌ \(p)") }
+        }
+        try? report.joined(separator: "\n").write(toFile: reportPath, atomically: true, encoding: .utf8)
+        exit(problems.isEmpty ? 0 : 1)
+    }
+
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let delegate = AppDelegate()
+    delegate.focusVerificationMode = true
+    app.delegate = delegate
+
+    var problems: [String] = []
+
+    /// 时间用例**跑完了没有**（用来和后面的「取消」用例串行）。
+    var timeChecksDone = false
+
+    // 整段检查排成**异步步骤**，由真事件循环驱动。
+    func step(_ delay: TimeInterval, _ body: @escaping () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: body)
+    }
+    /// 等窗口真的拿到 key（激活是异步的，死等固定时长会误判）。
+    func waitForKey(_ sw: NSWindow, deadline: Date, done: @escaping () -> Void) {
+        if sw.isKeyWindow { done(); return }
+        if Date() >= deadline { done(); return }
+        step(0.15) { waitForKey(sw, deadline: deadline, done: done) }
+    }
+
+    // 等网页渲染器 + 桌面窗口就绪（网页要加载完才有 DOM）。
+    func waitForRenderer(_ attempt: Int) {
+        guard attempt < 40 else {
+            finish(["拿不到网页渲染器 / 桌面窗口"])
+            return
+        }
+        guard delegate.testWebRenderer != nil,
+              delegate.testDesktopWindow is DesktopWindow else {
+            step(0.25) { waitForRenderer(attempt + 1) }
+            return
+        }
+        runTodoFocusChecks()
+    }
+    step(0.8) { waitForRenderer(0) }
+
+    func runTodoFocusChecks() {
+        guard let renderer = delegate.testWebRenderer,
+              let window = delegate.testDesktopWindow as? DesktopWindow else {
+            finish(["拿不到网页渲染器 / 桌面窗口"])
+            return
+        }
+        // ⚠️ **必须先把课表摆到屏上** —— 真实启动时 `showCard()` 会
+        // `orderFrontRegardless()`；不摆上屏，窗口根本拿不到 key，
+        // 自检就会报「打不上字」这种**假 bug**。
+        delegate.testShowCard()
+        say("app 已启动：isActive=\(NSApp.isActive)")
+
+        // 真实点击：走系统命中测试 → 交互层 → forwardClick（和用户一样）。
+        let webH = renderer.webView.bounds.height
+        var raw: String?
+        func evalJS(_ js: String) -> [String: Any]? {
+            raw = nil
+            renderer.evaluateForTest(js) { raw = $0 }
+            for _ in 0..<60 {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+                if raw != nil { break }
+            }
+            guard let s = raw, let d = s.data(using: .utf8),
+                  let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return nil }
+            return o
+        }
+        func oneLine(_ value: Any?) -> String {
+            guard let value, let d = try? JSONSerialization.data(withJSONObject: value, options: []) else {
+                return "nil"
+            }
+            return String(data: d, encoding: .utf8) ?? "nil"
+        }
+        @discardableResult
+        func realClick(_ selector: String, _ what: String) -> Bool {
+            guard let c = evalJS("""
+            (function () {
+              var el = document.querySelector('\(selector)');
+              if (!el) return '';
+              var r = el.getBoundingClientRect();
+              var x = r.x + r.width / 2, y = r.y + r.height / 2;
+              var under = document.elementFromPoint(x, y);
+              return JSON.stringify({
+                x: x, y: y,
+                under: under ? (under.className || under.tagName) : 'null'
+              });
+            })();
+            """),
+                  let x = (c["x"] as? NSNumber)?.doubleValue,
+                  let y = (c["y"] as? NSNumber)?.doubleValue else {
+                problems.append("找不到要点的元素：\(what)（\(selector)）")
+                return false
+            }
+            let wp = NSPoint(x: x, y: webH - y)
+            let hitView = window.contentView?.hitTest(wp)
+            let hitName = hitView.map { String(describing: type(of: $0)) } ?? "nil"
+            say("点 \(what)：css=(\(Int(x)),\(Int(y))) elementFromPoint=\(c["under"] ?? "?") 命中视图=\(hitName)")
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                guard let ev = NSEvent.mouseEvent(with: type, location: wp, modifierFlags: [],
+                                                  timestamp: ProcessInfo.processInfo.systemUptime,
+                                                  windowNumber: window.windowNumber, context: nil,
+                                                  eventNumber: 0, clickCount: 1,
+                                                  pressure: type == .leftMouseUp ? 0 : 1),
+                      let view = hitView else { continue }
+                switch type {
+                case .leftMouseDown: view.mouseDown(with: ev)
+                case .leftMouseUp: view.mouseUp(with: ev)
+                default: break
+                }
+            }
+            return true
+        }
+        // 输入区状态：输入框在不在、焦点在谁身上、网页最后发了什么。
+        func addState(_ label: String) -> [String: Any] {
+            let s = evalJS("""
+            (function () {
+              var inp = document.querySelector('[data-dp-input]');
+              // ⚠️ **判「输入区开着」要看可见性**，不能只看元素在不在 ——
+              // 2026-11-09 起输入框是**稳定元素**，收起时只是被 `display:none` 藏起来。
+              var form = document.querySelector('.dpaddform');
+              var formVisible = !!(form && form.offsetParent !== null && form.getBoundingClientRect().height > 0);
+              var ok = formVisible ? document.querySelector('.dpok') : null;
+              var act = document.activeElement;
+              var cards = document.querySelectorAll('[data-node-key="add"]');
+              // 「添加待办」那张卡的**身份 + 形态** ——
+              // 断言：两次打开之间必须是**同一张卡**（id 不变），
+              // 而且里面一直带着那个 input（hasInput 一直是 true）。
+              // 以前每次重绘都新建一张卡 → input 被搬走 → 失焦 → 键盘断掉。
+              var cardInfo = [];
+              for (var i = 0; i < cards.length; i++) {
+                var c = cards[i];
+                cardInfo.push({
+                  id: c.__probeId || (c.__probeId = Math.random().toString(36).slice(2, 8)),
+                  hasInput: !!c.querySelector('[data-dp-input]'),
+                  hasAdd: !!c.querySelector('.dpadd'),
+                  hasForm: !!c.querySelector('.dpaddform'),
+                  addDisp: c.querySelector('.dpadd') ? c.querySelector('.dpadd').style.display : '-',
+                  formDisp: c.querySelector('.dpaddform') ? c.querySelector('.dpaddform').style.display : '-'
+                });
+              }
+              return JSON.stringify({
+                adding: formVisible,
+                hasInput: !!inp,
+                focusIsInput: inp ? (act === inp) : false,
+                focusTag: act ? ((act.className || act.tagName) || '?') : 'null',
+                hasCancel: !!ok,
+                addCards: cardInfo,
+                lastAnyPost: window.__ttLastAnyPost ? window.__ttLastAnyPost.action : null
+              });
+            })();
+            """) ?? [:]
+            say("\(label)：\(oneLine(s))")
+            return s
+        }
+
+        // 前置：面板开着（原生那边也要知道），并把面板钉成完全可见
+        // （自检窗口不被合成器绘制，CSS 过渡会停在起始值 → 命中测试穿透）。
+        let monday = Calendar(identifier: .gregorian).startOfDay(for: Date())
+        delegate.testDayPanel?.updateBrowsingWeek(baseMonday: monday, allWeeks: false)
+        delegate.testDayPanel?.open(day: 4)
+        _ = evalJS("""
+        (function () {
+          if (window.ttDayPanelSetState) {
+            window.ttDayPanelSetState({ dayPanel: { day: 4, todos: [], events: [],
+              festival: { lunar: 'x', term: '', festivals: [] } },
+              dayFlags: {}, dayPanelOpen: true });
+          }
+          if (window.ttDayPanelOpen) window.ttDayPanelOpen(4, false);
+          var d = document.querySelector('.daypanel');
+          if (d) {
+            d.style.transition = 'none';
+            d.style.opacity = '1';
+            d.style.clipPath = 'none';
+            d.style.webkitClipPath = 'none';
+          }
+          return JSON.stringify({ ok: true });
+        })();
+        """)
+        step(0.6) {
+            // ---- 0. 先让 app 真的成为 active app ----
+            //
+            // ⚠️ **必须先激活**（用户点课表时 app 会被激活）。
+            // 否则 app 一直 inactive → `NSApp.activate` 拿不到前台 →
+            // `makeKey()` 永远失败 → 自检报的是**假 bug**
+            // （实测：不预激活时 `isActive` 恒为 false）。
+            //
+            // 激活是**异步**的：`NSApp.activate` 调用完那一瞬间 `isActive` 还是 false。
+            NSApp.activate(ignoringOtherApps: true)
+            NSRunningApplication(processIdentifier: ProcessInfo.processInfo.processIdentifier)?
+                .activate(options: [.activateAllWindows])
+            waitForActiveApp(attempt: 0)
+        }
+        // 等 app 真的 active（最多约 8 秒）。
+        func waitForActiveApp(attempt: Int) {
+            if NSApp.isActive || attempt >= 32 {
+                step(0.4) { runTodoFocusChecks2() }
+                return
+            }
+            NSApp.activate(ignoringOtherApps: true)
+            NSRunningApplication(processIdentifier: ProcessInfo.processInfo.processIdentifier)?
+                .activate(options: [.activateAllWindows])
+            step(0.25) { waitForActiveApp(attempt: attempt + 1) }
+        }
+        /// 等桌面窗口拿到 key（激活是异步的，死等固定时长会误判）。
+        func waitForKeyWindow(attempt: Int, then next: @escaping () -> Void) {
+            if window.isKeyWindow || attempt >= 24 {
+                say("等窗口拿 key：isKey=\(window.isKeyWindow) appActive=\(NSApp.isActive)")
+                step(0.3) { next() }
+                return
+            }
+            NSApp.activate(ignoringOtherApps: true)
+            NSRunningApplication(processIdentifier: ProcessInfo.processInfo.processIdentifier)?
+                .activate(options: [.activateAllWindows])
+            step(0.15) { waitForKeyWindow(attempt: attempt + 1, then: next) }
+        }
+
+        /// **输入时间**的用例（标题框 / 时框 / 分框之间来回切）。
+        func runTimeInputChecksBody() {
+            let before = evalJS("""
+            (function () {
+              var cards = document.querySelectorAll('.dpcard');
+              var todos = document.querySelectorAll('.dpcard.todo');
+              return JSON.stringify({
+                cards: cards.length, todos: todos.length,
+                todoTexts: Array.prototype.map.call(todos, function (e) {
+                  return (e.textContent || '').replace(/\\s+/g, ' ').trim();
+                }),
+                text: (document.querySelector('.dpcards') || {}).textContent ?
+                      document.querySelector('.dpcards').textContent.slice(0, 40) : ''
+              });
+            })();
+            """)
+            say("输入时间之前：面板卡片=\(before?.description ?? "nil")")
+            // ⚠️ 这条断言**必须**有东西可看（2026-11-09）：
+            // 临时数据目录里待办是 0 条时，「0 → 0 没变」恒真 = 没验。
+            // 现在 focus 模式会给面板塞一条假待办（`EmptyEventKitStore(seededTodos:)`）。
+            let seededTodos = (before?["todos"] as? NSNumber)?.intValue ?? -1
+            if seededTodos <= 0 {
+                problems.append("自检没看到任何待办（\(seededTodos) 条）—— "
+                                + "「输入时间时待办不能消失」这条会空转，先查假数据注入")
+            }
+            let seededTexts = (before?["todoTexts"] as? [String]) ?? []
+            _ = evalJS("""
+            (function () {
+              window.__ttFocusEvents = [];
+              window.__ttGuardLog = [];
+              window.__ttPostTrace = [];
+              window.__ttCardLog = [];
+              ['focus','blur','mousedown','click','pointerdown'].forEach(function (k) {
+                document.addEventListener(k, function (e) {
+                  var t = e.target;
+                  window.__ttFocusEvents.push(k + ':' +
+                    (t ? (t.getAttribute('data-dp-time-part') ||
+                          t.getAttribute('data-dp-input') ||
+                          (t.className || t.tagName)) : 'none') +
+                    '@' + Math.round(performance.now()));
+                }, true);
+              });
+              return JSON.stringify({ ok: true });
+            })();
+            """)
+
+            // 点「时」框（真实点击）
+            realClick("[data-dp-time-part=add-hour]", "时框")
+            step(0.6) {
+                let afterHour = evalJS("""
+                (function () {
+                  var act = document.activeElement;
+                  var cards = document.querySelectorAll('.dpcard');
+                  var todos = document.querySelectorAll('.dpcard.todo');
+                  return JSON.stringify({
+                    focus: act ? (act.getAttribute('data-dp-time-part') || 'other') : 'none',
+                    cards: cards.length, todos: todos.length,
+                    text: (document.querySelector('.dpcards') || {}).textContent ?
+                          document.querySelector('.dpcards').textContent.slice(0, 40) : ''
+                  });
+                })();
+                """)
+                say("点完「时」框：\(afterHour?.description ?? "nil")")
+                let evlog = evalJS("""
+                (function () {
+                  var act = document.activeElement;
+                  var c = document.querySelector('[data-node-key="add"]');
+                  return JSON.stringify({
+                    focusTag: act ? ((act.className || act.tagName) || '?') : 'null',
+                    focusPart: act ? (act.getAttribute('data-dp-time-part') ||
+                                      act.getAttribute('data-dp-input') || 'other') : 'none',
+                    // 「添加待办」那张卡里必须一直带着那个 input ——
+                    // 被搬走就说明要重建 → 失焦 → 键盘断掉。
+                    addCardHasInput: c ? !!c.querySelector('[data-dp-input]') : false
+                  });
+                })();
+                """)
+                say("时框点击后：\(evlog?.description ?? "nil")")
+                say("原生侧：isKeyWindow=\(window.isKeyWindow) "
+                    + "firstResponderReady=\(window.firstResponderReady) "
+                    + "textInputActive=\(renderer.testTextInputActive)")
+                // ⚠️ **点进「时」框不能退出文本输入模式** ——
+                // 退了键盘就断了（「时间输入还是有问题」）。
+                if renderer.testTextInputActive != true {
+                    problems.append("点进「时」框之后原生退出了文本输入模式"
+                                    + "（键盘断了 —— 时间输入不了）")
+                }
+                if !window.firstResponderReady {
+                    problems.append("点进「时」框之后原生没把 first responder 交给 webView")
+                }
+                if (afterHour?["focus"] as? String) != "add-hour" {
+                    problems.append("点「时」框之后焦点没落在时框上"
+                                    + "（实际=\(afterHour?["focus"] ?? "nil")）")
+                }
+                // 待办事项不能消失
+                let todosBefore = (before?["todos"] as? NSNumber)?.intValue ?? -1
+                let todosAfter = (afterHour?["todos"] as? NSNumber)?.intValue ?? -1
+                if todosBefore >= 0 && todosAfter != todosBefore {
+                    problems.append("输入时间时上面的待办事项消失了"
+                                    + "（\(todosBefore) 条 → \(todosAfter) 条）")
+                }
+
+                // ---- 标题框 → 时框：焦点在表单内切换，**不能**退出文本输入模式 ----
+                //
+                // 标题框的 onblur 以前无条件 `post('textInputBlur')`
+                // → 原生把键盘收走 → 时框打不了字。
+                //
+                // ⚠️ 用**真实点击**点标题框（不是 `focus()`）——
+                // 只有真实点击才会触发 blur → focus 的完整链路。
+                realClick("[data-dp-input]", "标题框")
+                step(0.8) {
+                    let afterTitle = evalJS("""
+                    (function () {
+                      var act = document.activeElement;
+                      return JSON.stringify({
+                        focus: act ? (act.getAttribute('data-dp-time-part') ||
+                                      act.getAttribute('data-dp-input') || 'other') : 'none',
+                        focusEvents: (window.__ttFocusEvents || []).join(' | ')
+                      });
+                    })();
+                    """)
+                    say("点完「标题框」：\(afterTitle?.description ?? "nil")")
+                    say("原生侧：textInputActive=\(renderer.testTextInputActive) "
+                        + "firstResponderReady=\(window.firstResponderReady)")
+                    if renderer.testTextInputActive != true {
+                        problems.append("点标题框之后原生退出了文本输入模式"
+                                        + "（键盘断了 —— 接着点时框打不了字）")
+                    }
+                    if (afterTitle?["focus"] as? String) != "1" &&
+                       (afterTitle?["focus"] as? String) != "other" {
+                        problems.append("点标题框之后焦点没落在标题框上"
+                                        + "（实际=\(afterTitle?["focus"] ?? "nil")）")
+                    }
+                    // 点「分」框
+                    //
+                    // ⚠️ **必须在这个 step 里面点** ——
+                    // 写在 step 外面的话它会**立刻**执行，
+                    // 上面的断言读到的就是「点完分框」的状态（顺序全乱）。
+                    realClick("[data-dp-time-part=add-minute]", "分框")
+                    step(0.7) {
+                    let afterMin = evalJS("""
+                    (function () {
+                      var act = document.activeElement;
+                      var todos = document.querySelectorAll('.dpcard.todo');
+                      var cards = document.querySelectorAll('.dpcard');
+                      return JSON.stringify({
+                        focus: act ? (act.getAttribute('data-dp-time-part') || 'other') : 'none',
+                        cards: cards.length, todos: todos.length,
+                        todoTexts: Array.prototype.map.call(todos, function (e) {
+                          return (e.textContent || '').replace(/\\s+/g, ' ').trim();
+                        })
+                      });
+                    })();
+                    """)
+                    say("点完「分」框：\(afterMin?.description ?? "nil")")
+                    let glog = evalJS("JSON.stringify({g: (window.__ttGuardLog || []).join(' || ')})")
+                    say("blur 守卫判定：\(glog?["g"] as? String ?? "nil")")
+                    let clog = evalJS("JSON.stringify({c: (window.__ttCardLog || []).join(' || ')})")
+                    say("卡片日志：\(clog?["c"] as? String ?? "nil")")
+                    let plog = evalJS("JSON.stringify({p: (window.__ttPostTrace || []).join(' || ')})")
+                    say("post 轨迹：\(plog?["p"] as? String ?? "nil")")
+                    say("原生侧：isKeyWindow=\(window.isKeyWindow) "
+                        + "firstResponderReady=\(window.firstResponderReady) "
+                        + "textInputActive=\(renderer.testTextInputActive)")
+                    if renderer.testTextInputActive != true {
+                        problems.append("点进「分」框之后原生退出了文本输入模式"
+                                        + "（键盘断了 —— 时间输入不了）")
+                    }
+                    if (afterMin?["focus"] as? String) != "add-minute" {
+                        problems.append("点「分」框之后焦点没落在分框上"
+                                        + "（实际=\(afterMin?["focus"] ?? "nil")）")
+                    }
+                    let t2 = (afterMin?["todos"] as? NSNumber)?.intValue ?? -1
+                    if todosBefore >= 0 && t2 != todosBefore {
+                        problems.append("输入时间时上面的待办事项消失了"
+                                        + "（\(todosBefore) 条 → \(t2) 条）")
+                    }
+                    // 待办的**内容**也不能被换掉（用户原话：「输入时间时上面的
+                    // 待办事项就没了」——只看条数不够，卡片可能被整张重建成空的）。
+                    let afterTexts = (afterMin?["todoTexts"] as? [String]) ?? []
+                    if !seededTexts.isEmpty && afterTexts != seededTexts {
+                        problems.append("输入时间时待办卡片被换掉了"
+                                        + "（\(seededTexts) → \(afterTexts)）")
+                    }
+                    // ⚠️ **时间用例跑完之后**才能做「取消」用例 ——
+                    // 两个 `step` 是并行的，「取消」撞在时间用例中间的话
+                    // 会把输入区收起来 → 时框立刻失焦 → 后面全乱。
+                    //
+                    // ⚠️ 这一行**必须在 `step(0.7)` 块里**（2026-11-09 修）。
+                    // 以前写在块外：`step` 只是**排期**，块还没跑就先翻了标志 →
+                    // 「取消」用例 0.2s 后就点下去把输入区收起来 →
+                    // 0.7s 后分框断言读到的已经是「取消之后」的状态
+                    // （`focus=other` / `adding=false` / 文本输入模式已退出）→ 假红。
+                    timeChecksDone = true
+                    }
+                }
+            }
+        }
+
+        func runTodoFocusChecks2() {
+            say("app 激活：isActive=\(NSApp.isActive)")
+            // ---- 1. 点「＋ 添加待办」→ 输入框出现 **且自己拿到焦点** ----
+            realClick(".dpadd", "＋ 添加待办")
+            step(0.9) {
+                let afterOpen = addState("点完「＋ 添加待办」")
+                if (afterOpen["adding"] as? Bool) != true {
+                    problems.append("点「＋ 添加待办」之后输入框必须出现")
+                }
+                if (afterOpen["focusIsInput"] as? Bool) != true {
+                    problems.append("点「＋ 添加待办」之后标题输入框必须自己拿到焦点"
+                                    + "（实际焦点=\(afterOpen["focusTag"] ?? "nil")）")
+                }
+                // ---- 关键：原生这一侧到底有没有真的把键盘交给网页 ----
+                say("原生侧：isActive=\(NSApp.isActive) isKeyWindow=\(window.isKeyWindow) "
+                    + "firstResponderReady=\(window.firstResponderReady) "
+                    + "firstResponder=\(window.firstResponder.map { String(describing: type(of: $0)) } ?? "nil")")
+                if !window.firstResponderReady {
+                    problems.append("网页要了文本输入模式，但原生没把 first responder 交给 webView"
+                                    + "（键盘进不到网页 —— 用户报的就是这个）")
+                }
+                if !window.isKeyWindow {
+                    problems.append("桌面窗口没拿到 key window（键盘进不到网页）")
+                }
+
+                // ---- 2. **输入时间**：切到时 / 分框时不能退出文本输入模式 ----
+                //
+                // 用户原话（2026-11-09 下午）：
+                //   「现在时间输入还是有问题，输入也不够连贯，输入时间时上面的待办事项就没了」
+                //
+                // 验三件事：
+                //   1. 从标题框点到「时」框 → **原生不能退出文本输入模式**
+                //      （以前标题框 onblur 无条件 `post('textInputBlur')`
+                //        → 原生 `setTextInputMode(false)` → 键盘断掉）；
+                //   2. 从「时」框点到「分」框 → 同上（时框 onblur 也一样）；
+                //   3. 输入期间**上面的待办事项不能消失**（面板内容不能被清空）。
+                waitForKeyWindow(attempt: 0) { runTimeInputChecksBody() }
+
+                // ---- 3. 键能不能进网页，取决于**原生这三个前提** ----
+                //
+                // ⚠️ 这里**不**用合成按键来断言「字打进去了」：
+                // app 真的 active、窗口真的 key 时，**合成的 NSEvent 不会走
+                // 真正的键盘 / 输入法管线**，WebKit 收不到（实测：
+                // `NSApp.sendEvent` 和 `window.sendEvent` 两种方式，
+                // 网页侧的 keydown 探针都是空的）。
+                //
+                // 「按键真的进到输入框」由 `--verify-typing` 负责
+                // （那个自检在 app **不 active** 的环境下跑，合成按键能进）。
+                // 本项只管**原生侧的前提**——
+                // 用户报的现象正是「前提没满足，键盘进不去」。
+                // ---- 3. 点「取消」**一次**就要收起 ----
+                //
+                // ⚠️ **必须等时间用例跑完**（串行）——
+                // 两个 `step` 是并行的，「取消」撞在时间用例中间的话
+                // 会把输入区收起来 → 时框立刻失焦 → 后面全乱。
+                waitForTimeChecks(attempt: 0)
+                func waitForTimeChecks(attempt: Int) {
+                    if timeChecksDone || attempt >= 40 {
+                        step(0.2) { startCancelChecks() }
+                        return
+                    }
+                    step(0.2) { waitForTimeChecks(attempt: attempt + 1) }
+                }
+                func startCancelChecks() {
+                    realClick(".dpok", "取消（第一次）")
+                    step(0.8) {
+                        let afterCancel1 = addState("第一次点「取消」之后")
+                        if (afterCancel1["adding"] as? Bool) != false {
+                            problems.append("点一次「取消」就必须收起输入区（实际还在）")
+                        }
+                        say("取消之后原生侧：isActive=\(NSApp.isActive) "
+                            + "isKeyWindow=\(window.isKeyWindow) "
+                            + "firstResponderReady=\(window.firstResponderReady)")
+                        // ⚠️ **app 不能停在「active 但没有 key window」这个状态** ——
+                        // 那样下一次 `makeKey()` 会被 AppKit 直接拒绝
+                        // （本轮修复的核心：退出输入模式时**不交出 key**）。
+                        if NSApp.isActive && !window.isKeyWindow {
+                            problems.append("退出输入模式后 app 处于「active 但没有 key window」"
+                                            + " —— 下一次打开输入框就拿不到 key")
+                        }
+
+                        // ---- 4. 重新打开 → 再点「取消」，**仍然一次**收起 ----
+                        realClick(".dpadd", "＋ 添加待办（第二次）")
+                        step(1.5) {
+                            let reopened = addState("第二次点开「＋ 添加待办」之后")
+                            if (reopened["adding"] as? Bool) != true {
+                                problems.append("第二次点「＋ 添加待办」必须能再打开输入区")
+                            }
+                            if (reopened["focusIsInput"] as? Bool) != true {
+                                problems.append("第二次打开时标题输入框必须自己拿到焦点"
+                                                + "（实际焦点=\(reopened["focusTag"] ?? "nil")）")
+                            }
+                            say("第二次打开后原生侧：isActive=\(NSApp.isActive) "
+                                + "isKeyWindow=\(window.isKeyWindow) "
+                                + "firstResponderReady=\(window.firstResponderReady)")
+                            // ⚠️ **这一条是本轮修的核心**（2026-11-09）。
+                            //
+                            // 以前：退出输入模式时 `resignKey()` → app 变成
+                            // 「active 但没有 key window」→ 第二次 `makeKey()`
+                            // 被 AppKit **直接拒绝**（12 次重试全失败）→
+                            // 键盘进不到网页（用户原话：「输入键盘无法聚焦」）。
+                            if !window.isKeyWindow {
+                                problems.append("第二次打开时桌面窗口没拿到 key window"
+                                                + "（键盘进不到网页 —— 本轮修的就是这个）")
+                            }
+                            if !window.firstResponderReady {
+                                problems.append("第二次打开时原生没把 first responder 交给 webView")
+                            }
+                            // ⚠️ **「添加待办」那张卡必须还是同一张**（网页侧那条修复）。
+                            //
+                            // 以前每次重绘都新建一张卡 → 共享的 input 元素被搬走
+                            // → 失焦 → `post('textInputBlur')` → 原生退出文本输入模式
+                            // → 键盘断掉。
+                            if let cards = reopened["addCards"] as? [[String: Any]] {
+                                let ids = cards.compactMap { $0["id"] as? String }
+                                if ids.count != 1 {
+                                    problems.append("「添加待办」只能有一张卡（实际 \(ids.count) 张）")
+                                } else if let first = afterOpen["addCards"] as? [[String: Any]],
+                                          let firstId = first.first?["id"] as? String,
+                                          firstId != ids[0] {
+                                    problems.append("「添加待办」那张卡在两次打开之间被换掉了"
+                                                    + "（\(firstId) → \(ids[0])）—— input 元素会被搬走")
+                                }
+                                for c in cards {
+                                    if (c["hasInput"] as? Bool) != true {
+                                        problems.append("「添加待办」那张卡里没有输入框了"
+                                                        + "（input 被搬走了 → 会失焦 → 键盘断掉）")
+                                        break
+                                    }
+                                }
+                            }
+                            // 第一次打开时那张卡里**必须**就有 input ——
+                            // 以前第二次打开时 input 才被搬走（第一次是好的），
+                            // 所以这条要在**第一次**的状态上断言。
+                            if let first = afterOpen["addCards"] as? [[String: Any]],
+                               let c = first.first,
+                               (c["hasInput"] as? Bool) != true {
+                                problems.append("「添加待办」那张卡里没有输入框（input 被搬走了"
+                                                + " → 会失焦 → 键盘断掉）")
+                            }
+                            realClick(".dpok", "取消（第二次）")
+                            step(0.8) {
+                                let afterCancel2 = addState("第二次点「取消」之后")
+                                if (afterCancel2["adding"] as? Bool) != false {
+                                    problems.append("重新打开之后，点一次「取消」也必须收起（实际还在）")
+                                }
+                                finish(problems)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 事件循环跑起来 —— 上面那些异步步骤全靠它驱动。
+    // ⚠️ 少了这一行，异步步骤永远不执行（自检会直接报「拿不到渲染器」）。
+    app.run()
 }
 
 if arguments.contains("--verify-snapshot-mode") {

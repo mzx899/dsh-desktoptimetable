@@ -3963,9 +3963,10 @@ suite("网页资源 · CSS / JS 体检") {
                "不能再有 DP_WIDE_* 常量（宽态已删）")
         expect(jsNoComments.contains("DP.wide") == false,
                "不能再有 DP.wide 状态位（宽态已删）")
-        // 面板宽度仍然锁死在一列宽。
-        expect(js?.contains("el.style.width = col.w + 'px'") == true,
-               "面板宽度必须一直是单列宽")
+        // 面板宽度仍然锁死在一列宽：2026-11 起按「表头格的宽度 ÷ 倍率」算
+        //（覆盖层可能挂在卡片上，不再用 grid 的列几何）。
+        expect(js?.contains("el.style.width = (cb.width / s) + 'px'") == true,
+               "面板宽度必须一直是单列宽（表头格宽度）")
 
         // ---- **收起动画不能被 inline style 压掉**（2026-11 修）----
         //

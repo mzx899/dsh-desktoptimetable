@@ -119,21 +119,20 @@ final class TimetableDiffWindowController: NSObject, NSWindowDelegate {
     }
 
     private func buildWindow() {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 620),
-                         styleMask: [.titled, .closable, .resizable],
-                         backing: .buffered, defer: false)
-        w.title = "合并课表差异"
+        // 和全 app 其它弹窗同一套外观：**深色渐变玻璃底 + 一圈上亮下暗的边缘假光**
+        // （2026-11-09 用户要求：「这个黑色的和现在不搭……按相同风格把这个背景优化」）。
+        // 所以走 `HUDWindow.make`（标题栏透明 + 内容铺满 + 浮动层）+
+        // `installContent`（材质 + 边缘假光）+ `installDarkBackdrop`（渐变玻璃底）。
+        let w = HUDWindow.make(title: "合并课表差异",
+                               size: NSSize(width: 780, height: 620),
+                               showsFullScreen: false)
         w.delegate = self
-        w.isReleasedWhenClosed = false
-        // 与设置面板同层：这两个窗是从设置面板里点出来的，必须压在面板上面
-        w.level = .floating
+        w.styleMask.insert(.resizable)
         w.minSize = NSSize(width: 640, height: 460)
-        // 摆在**课表窗口当前中心**（以前是屏幕正中间，课表拖走后弹窗离得很远）
-        HUDWindow.centerOnScreen(w)
         window = w
 
-        let root = NSView(frame: w.contentView!.bounds)
-        w.contentView = root
+        let root = HUDWindow.installContent(in: w, root: NSView())
+        HUDWindow.installDarkBackdrop(in: w, below: root)
 
         // ---- 顶部摘要 ----
         summaryLabel = NSTextField(labelWithString: diff.summary)
@@ -166,7 +165,29 @@ final class TimetableDiffWindowController: NSObject, NSWindowDelegate {
         stack.alignment = .leading
         stack.spacing = 14
         stack.edgeInsets = NSEdgeInsets(top: 8, left: 4, bottom: 8, right: 4)
-        scrollView.documentView = stack
+        // ⚠️ **document view 必须自己撑开**（2026-11-09 修）。
+        //
+        // 以前只写了 `scrollView.documentView = stack`：NSStackView 的 frame 一直停在
+        // `(0,0,0,0)`（实测 `frame=(0,0,0,0)`、`fittingSize=(338.5,745)`），
+        // 于是**整页列表是空白的** —— 行都在、就是没有一块可视区域。
+        // 现在钉在 clip view 上：宽度跟视口走、高度由内容自己算。
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        // 套一个**翻转**的容器当 document view：不翻转的话 scroll view 会从底部开始，
+        // 内容高度一超视口，整块列表就被顶到视口上方（实测 y = -274）。
+        let documentView = FlippedDocumentView()
+        documentView.translatesAutoresizingMaskIntoConstraints = false
+        documentView.addSubview(stack)
+        scrollView.documentView = documentView
+        NSLayoutConstraint.activate([
+            documentView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
+            documentView.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
+            documentView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            documentView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
+            stack.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: documentView.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: documentView.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: documentView.bottomAnchor),
+        ])
 
         // ---- 底部按钮 ----
         let footer = NSStackView()
@@ -197,7 +218,10 @@ final class TimetableDiffWindowController: NSObject, NSWindowDelegate {
         footer.translatesAutoresizingMaskIntoConstraints = false
         blockerLabel.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            summaryLabel.topAnchor.constraint(equalTo: root.topAnchor, constant: 16),
+            // 内容铺满整个窗口 → 左上角浮着红绿灯（约 24pt 高、x 13…67），
+            // 摘要行必须让开，否则会被压在按钮底下。
+            summaryLabel.topAnchor.constraint(equalTo: root.topAnchor,
+                                              constant: HUDWindow.trafficLightBand + 18),
             summaryLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
             summaryLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
 
@@ -228,7 +252,7 @@ final class TimetableDiffWindowController: NSObject, NSWindowDelegate {
         // 导入文件不含学期信息时 `diff.importedSemester` 是 nil，
         // 这两行不会出现（没有可比的东西就别显示）。
         if let imp = diff.importedSemester, diff.semesterStartChanged {
-            stack.addArrangedSubview(makeSemesterRow(
+            addCard(makeSemesterRow(
                 title: "开学日期",
                 currentText: Self.dateText(diff.currentSemester.start),
                 importedText: Self.dateText(imp.start),
@@ -237,7 +261,7 @@ final class TimetableDiffWindowController: NSObject, NSWindowDelegate {
                 setImported: { self.choice.semesterStart = .useImported; self.refresh() }))
         }
         if let imp = diff.importedSemester, diff.semesterMaxWeekChanged {
-            stack.addArrangedSubview(makeSemesterRow(
+            addCard(makeSemesterRow(
                 title: "总周数",
                 currentText: "\(diff.currentSemester.maxWeek)",
                 importedText: "\(imp.maxWeek)",
@@ -254,13 +278,13 @@ final class TimetableDiffWindowController: NSObject, NSWindowDelegate {
             warn.textColor = NSColor.systemOrange
             stack.addArrangedSubview(warn)
             for d in diff.ambiguous {
-                stack.addArrangedSubview(makeCourseRow(d, kind: .ambiguous))
+                addCard(makeCourseRow(d, kind: .ambiguous))
             }
         }
 
         // ---- 课程差异 ----
         for row in rows {
-            stack.addArrangedSubview(makeCourseRow(row.diff, kind: row.kind))
+            addCard(makeCourseRow(row.diff, kind: row.kind))
         }
 
         // ---- 时间冲突（导入的课 vs 你保留的课）----
@@ -276,7 +300,7 @@ final class TimetableDiffWindowController: NSObject, NSWindowDelegate {
             head.textColor = NSColor.systemOrange
             stack.addArrangedSubview(head)
             for unit in plan.conflicts {
-                stack.addArrangedSubview(makeConflictRow(unit))
+                addCard(makeConflictRow(unit), accent: NSColor.systemOrange)
             }
         }
 
@@ -285,6 +309,40 @@ final class TimetableDiffWindowController: NSObject, NSWindowDelegate {
         applyBtn?.isEnabled = canApply
         blockerLabel.stringValue = plan.blocker ?? ""
         blockerLabel.isHidden = (plan.blocker == nil)
+    }
+
+    /// 把一行内容包进玻璃卡片（2026-11-09：用户要求「按相同风格」）。
+    ///
+    /// 卡片铺满列表宽度、圆角 10、白 4.5% 底 + 1pt 描边；
+    /// 冲突行给琥珀色描边（和时间覆盖层的警告色一致）。
+    private func makeCard(_ content: NSView, accent: NSColor? = nil) -> NSView {
+        let card = NSView()
+        card.wantsLayer = true
+        card.layer?.cornerRadius = 10
+        card.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.045).cgColor
+        card.layer?.borderWidth = 1
+        let accentColor = accent ?? NSColor.white
+        card.layer?.borderColor = accentColor.withAlphaComponent(accent == nil ? 0.10 : 0.38).cgColor
+        card.translatesAutoresizingMaskIntoConstraints = false
+
+        content.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: card.topAnchor, constant: 10),
+            content.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -10),
+            content.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 12),
+            content.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -12),
+        ])
+        return card
+    }
+
+    /// 往列表里塞一张卡片：宽度铺满列表可用宽度。
+    private func addCard(_ content: NSView, accent: NSColor? = nil) {
+        guard let stack else { return }
+        let card = makeCard(content, accent: accent)
+        stack.addArrangedSubview(card)
+        let insets = stack.edgeInsets.left + stack.edgeInsets.right
+        card.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -insets).isActive = true
     }
 
     /// 一条冲突：导入的课 / 你的课 / 三个单选项。
@@ -329,13 +387,7 @@ final class TimetableDiffWindowController: NSObject, NSWindowDelegate {
             })
         }
         container.addArrangedSubview(buttons)
-
-        let sep = NSBox()
-        sep.boxType = .separator
-        sep.translatesAutoresizingMaskIntoConstraints = false
-        // 先入容器再激活约束（顺序反了会抛 no common ancestor，见 makeCourseRow 里的注释）
-        container.addArrangedSubview(sep)
-        sep.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
+        // 卡片本身已经是边界 —— 不再画分隔线（2026-11-09 改玻璃卡片）。
         return container
     }
 
@@ -463,18 +515,7 @@ final class TimetableDiffWindowController: NSObject, NSWindowDelegate {
             })
         }
         container.addArrangedSubview(buttons)
-
-        // ---- 分隔线 ----
-        let sep = NSBox()
-        sep.boxType = .separator
-        sep.translatesAutoresizingMaskIntoConstraints = false
-        // 顺序不能反：先 addArrangedSubview 再激活约束。
-        // 反过来的话两个视图还没有共同祖先，AppKit 直接抛
-        // 「Unable to activate constraint ... no common ancestor」——
-        // 差异页一打开就崩，而且只在真的进差异页时才炸。
-        container.addArrangedSubview(sep)
-        sep.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
-
+        // 卡片本身已经是边界 —— 不再画分隔线（2026-11-09 改玻璃卡片）。
         return container
     }
 
@@ -618,6 +659,11 @@ final class TimetableDiffWindowController: NSObject, NSWindowDelegate {
     // MARK: - 自检钩子
 
     var testIsVisible: Bool { window?.isVisible ?? false }
+    /// 自检/出图用：列表（document view）的 frame 与 fittingSize ——
+    /// 判断「列表一片空白」是不是 document view 尺寸为零。
+    var testListFrame: NSRect { stack?.frame ?? .zero }
+    var testListFitting: NSSize { stack?.fittingSize ?? .zero }
+    var testListRows: Int { stack?.arrangedSubviews.count ?? 0 }
     var testWindow: NSWindow? { window }
     var testPlan: ImportConflictLogic.Plan { plan }
     var testApplyEnabled: Bool { applyBtn?.isEnabled ?? false }

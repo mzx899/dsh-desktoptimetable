@@ -729,6 +729,31 @@ final class WebCardRenderer: NSObject {
             completionHandler: nil)
     }
 
+    /// 转发一次**右键**（`contextmenu`）。
+    ///
+    /// 交互层盖在 webView 上，右键先被它接走 → 这里合成一个
+    /// `contextmenu` 事件派发到命中元素上（网页里是捕获阶段监听，
+    /// 待办 → 弹原生菜单；课程格 → 课程右键菜单）。
+    func forwardContextMenu(at point: NSPoint) {
+        let p = cssPoint(point)
+        let js = """
+        (function () {
+          var el = document.elementFromPoint(\(p.x), \(p.y));
+          if (!el) return 'none';
+          var opts = { bubbles: true, cancelable: true, view: window,
+                       clientX: \(p.x), clientY: \(p.y), button: 2, buttons: 2 };
+          el.dispatchEvent(new MouseEvent('contextmenu', opts));
+          return (el.className || el.tagName);
+        })();
+        """
+        webView.evaluateJavaScript(js) { value, error in
+            if ProcessInfo.processInfo.environment["DT_DEBUG_INPUT"] != nil {
+                NSLog("[DesktopTimetable] 转发右键 -> %@ err=%@", String(describing: value),
+                      error.map { "\($0.localizedDescription)" } ?? "nil")
+            }
+        }
+    }
+
     /// 让网页展开某门课的详情浮层（B 模式的「查看详情」用）。
     func selectCourse(day: Int, block: Int, courseID: String) {
         let js = "window.ttSelectCourse ? window.ttSelectCourse(\(day), \(block), '\(courseID)') : false;"
@@ -813,6 +838,9 @@ final class WebCardRenderer: NSObject {
         textInputActive = active
         onTextInputModeChanged?(active)
     }
+
+    /// 自检用：现在是不是「文本输入模式」（网页里的输入框正在编辑）。
+    var testTextInputActive: Bool { textInputActive }
 
     /// 调试用（DT_LIVE_PROBE=1）：把网页里关键元素的位置量出来并打日志，
     /// 方便外部脚本按坐标点击。

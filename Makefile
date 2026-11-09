@@ -4,7 +4,7 @@ APP_NAME    := DesktopTimetable
 ## 按小版本惯例**不换** bundle id —— 和 1.2.0 ~ 1.2.7 是同一个 App，
 ## 日历 / 提醒事项授权、登录项、通知身份全部延续，不用重新登记。
 BUNDLE_ID   := com.desktoptimetable.app.v120
-VERSION     := 1.4.3
+VERSION     := 1.4.7
 BUILD_DIR   := build
 APP_BUNDLE  := $(BUILD_DIR)/$(APP_NAME).app
 ## 根目录入口的名字带版本号，好和旁边的旧版并存：
@@ -227,6 +227,28 @@ verify: app
 	 TY_RC=$$?; \
 	 rm -rf "$$TYDIR"; \
 	 if [ $$TY_RC -ne 0 ]; then echo "❌ 文本输入自检没通过（退出码 $$TY_RC）"; exit 1; fi
+	 @echo "";
+	 @echo "── 待办输入框聚焦 / 取消一次生效（**真机**，经 LaunchServices）──"; \
+	 TFDIR=`mktemp -d /tmp/dt-tf-XXXXXX`; \
+	 DT_DATA_DIR="$$TFDIR" DT_FOCUS_REPORT="$$TFDIR/report.txt" \
+	   open -n "$(APP_BUNDLE)" --env DT_DATA_DIR="$$TFDIR" --env DT_FOCUS_REPORT="$$TFDIR/report.txt" \
+	        --args --verify-todo-focus; \
+	 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
+	   [ -f "$$TFDIR/report.txt" ] && break; \
+	   sleep 1; \
+	 done; \
+	 if [ -f "$$TFDIR/report.txt" ]; then \
+	   cat "$$TFDIR/report.txt"; \
+	 else \
+	   echo "❌ 待办输入框聚焦自检没有产出报告（app 可能没起来）"; \
+	   rm -rf "$$TFDIR"; exit 1; \
+	 fi; \
+	 if grep -q "✅" "$$TFDIR/report.txt"; then \
+	   rm -rf "$$TFDIR"; \
+	 else \
+	   echo "❌ 待办输入框聚焦自检没通过"; \
+	   rm -rf "$$TFDIR"; exit 1; \
+	 fi
 
 ## 编译并启动（默认 B：网页直接上屏）
 run: app

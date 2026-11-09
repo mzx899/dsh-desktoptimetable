@@ -1,4 +1,10 @@
 import AppKit
+import WebKit
+
+extension Notification.Name {
+    /// 请求网页取消「添加 / 编辑待办」（Esc）。
+    static let ttCancelEditingRequested = Notification.Name("tt.cancelEditing.requested")
+}
 
 /// 桌面层窗口。
 ///
@@ -202,8 +208,47 @@ final class DesktopWindow: NSWindow {
                 makeFirstResponder(nil)
             }
             firstResponderReady = false
-            resignKey()
+            // ⚠️⚠️ **不要盲目 `resignKey()`**（2026-11-09 修「第二次打不上字」）。
+            //
+            // 根因：`.nonactivatingPanel` 窗口**只有跟着 app 的「激活过程」才能拿到 key**。
+            // 第一次输入时 app 还是 inactive → `NSApp.activate` 触发激活过程 →
+            // `makeKey()` 成功（实测 attempt=0 `appActive=false isKey=false`
+            // → attempt=1 `appActive=true isKey=true`）。
+            //
+            // 退出输入模式时如果 `resignKey()`，app 就变成「**active 但没有 key window**」
+            // —— 这是 AppKit 的一个怪状态：此时 `makeKey()` 会被**直接拒绝**，
+            // 12 次重试全是 `appActive=true isKey=false`（实测，`--verify-todo-focus`）。
+            //
+            // 后果有两条：
+            //   1. **键盘进不去**（用户原话：「输入键盘无法聚焦」）——
+            //      webView 拿不到 first responder；
+            //   2. **`takeKeyForTextInput` 疯狂重试 4 秒**（每次都
+            //      `NSApp.activate` + `activateAllWindows` + `makeKey`），
+            //      窗口被反复摆到前面 → **用户的点击被吃掉**（「取消要点两次」）。
+            //
+            // 修法：**窗口是 key 的时候不交出 key**，只把 first responder 收回来。
+            // 这样 app 一直有 key window，下一次 `makeKey()` 照样认（实测 attempt=0 就成）。
+            //
+            // 窗口本来就不是 key（没进过输入模式）时，照旧 `resignKey()`。
+            if !isKeyWindow { resignKey() }
         }
+    }
+
+    /// Esc 的统一出口。
+    ///
+    /// ⚠️ 输入模式下窗口是 key，第一下 Esc 有时会走 AppKit 的 `cancelOperation`
+    /// 而不是 DOM 的 `keydown`（用户反馈「要按两下取消添加」）——
+    /// 这里直接通知网页取消输入，等于把两条路径合并成一条。
+    override func cancelOperation(_ sender: Any?) {
+        if textInputMode, let web = textInputTarget as? WKWebView {
+            // 推到下一个 runloop：这里也在事件派发栈里，同步 eval 会被吞。
+            // 具体怎么取消交给 AppDelegate（走状态推送那条稳的通道）。
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .ttCancelEditingRequested, object: web)
+            }
+            return
+        }
+        super.cancelOperation(sender)
     }
 
     /// 自检用：窗口是不是已经拿到 key、并且把键盘交给了 webView。
@@ -221,6 +266,25 @@ final class DesktopWindow: NSWindow {
         NSApp.activate(ignoringOtherApps: true)
         NSRunningApplication(processIdentifier: ProcessInfo.processInfo.processIdentifier)?
             .activate(options: [.activateAllWindows])
+
+        // ⚠️⚠️ **app 还没 active 就别急着 `makeKey()`**（2026-11-09 修「时好时坏」）。
+        //
+        // `.nonactivatingPanel` 窗口**只有跟着 app 的「激活过程」才能拿到 key**
+        // —— app 还是 inactive 时调 `makeKey()` 一定失败，
+        // 只能靠下一轮重试（实测要等 80ms 上下）才拿得到。
+        //
+        // 以前每次都直接 `makeKey()` → **白白浪费掉第 0 次重试**，
+        // 用户「点完马上打字」的那一下正好落在这个空档里。
+        //
+        // 现在：**先等 app 真的 active 了，再去拿 key**。
+        if !NSApp.isActive && attempt < 12 {
+            let delay = min(0.05 * Double(attempt + 1), 0.4)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.takeKeyForTextInput(token: token, attempt: attempt + 1)
+            }
+            return
+        }
+
         makeKey()
         // ⚠️ 关键的一步：把键盘交给 webView（窗口是 key 只是前提）。
         if let target = textInputTarget {
@@ -229,6 +293,13 @@ final class DesktopWindow: NSWindow {
 
         let responderOK = textInputTarget.map { firstResponder === $0 } ?? true
         let ready = isKeyWindow && responderOK
+        // 诊断日志（只在 `DT_DEBUG_INPUT=1` 时写）——
+        // 「为什么拿不到 key window」这类问题只有这里有证据。
+        if ProcessInfo.processInfo.environment["DT_DEBUG_INPUT"] != nil {
+            DiagLog.info("[TT-KEY] attempt=\(attempt) mode=\(textInputMode) "
+                        + "token=\(token)/\(textInputToken) appActive=\(NSApp.isActive) "
+                        + "isKey=\(isKeyWindow) responderOK=\(responderOK) visible=\(isVisible)")
+        }
         if ready {
             if !firstResponderReady {
                 firstResponderReady = true

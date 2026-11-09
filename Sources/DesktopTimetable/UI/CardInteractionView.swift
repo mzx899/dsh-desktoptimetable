@@ -23,6 +23,12 @@ final class CardInteractionView: NSView {
     var onDragTo: ((NSPoint) -> Void)?
     /// 一次「没拖动的点击」—— 位置是**交互层**坐标系（原点左下）。
     var onClick: ((NSPoint) -> Void)?
+    /// 右键（位置同上）。网页里的 `contextmenu` 要靠原生转发。
+    ///
+    /// ⚠️ 交互层盖在 WKWebView 上面做拖动 / 图钉，**右键也会先被它接走**；
+    /// 不转发的话网页永远收不到 `contextmenu` —— 待办 / 课程的右键菜单、
+    /// 以及「修改… / 删除 / 取消」就全都出不来。
+    var onRightClick: ((NSPoint) -> Void)?
     /// 悬停回调（屏幕坐标）。
     var onHover: ((NSPoint?) -> Void)?
     /// 一次拖动结束（鼠标松开）—— 用来把新位置写盘。
@@ -174,6 +180,14 @@ final class CardInteractionView: NSView {
         let base = dragWindowOrigin ?? window?.frame.origin ?? .zero
         onDragTo?(NSPoint(x: base.x + (now.x - start.x),
                           y: base.y + (now.y - start.y)))
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        // ⚠️ 推到下一个 runloop 再转发：这里还在右键事件的派发栈里，
+        // 直接 `evaluateJavaScript` 会被 WebKit 接受但不执行
+        //（和之前「点箭头不刷新 / Esc 取消没反应」同一个坑）。
+        DispatchQueue.main.async { [weak self] in self?.onRightClick?(p) }
     }
 
     override func mouseUp(with event: NSEvent) {

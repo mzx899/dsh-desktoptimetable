@@ -334,8 +334,17 @@ enum TimetableLayout {
 
     /// 表头行的矩形。
     static var headerRect: NSRect {
-        NSRect(x: gridOrigin.x, y: gridOrigin.y + dataHeight + gapScaled,
-               width: cardWidth - cardPaddingHScaled * 2, height: headerRowHeightScaled)
+        // 折叠态：网格被裁到只剩表头一行，表头贴着卡片底部
+        //（下面只留 cardPaddingBottom 的留白）—— 展开公式算出来的位置
+        // 已经在卡片外面了，不能再直接用。
+        let bottom: CGFloat
+        if collapse > 0.5 {
+            bottom = cardRect.minY + cardPaddingBottomScaled
+        } else {
+            bottom = gridOrigin.y + dataHeight + gapScaled
+        }
+        return NSRect(x: gridOrigin.x, y: bottom,
+                      width: cardWidth - cardPaddingHScaled * 2, height: headerRowHeightScaled)
     }
 
     /// 时间列（第 0 列）的矩形。
@@ -354,8 +363,15 @@ enum TimetableLayout {
     static func dayPanelRect(day: Int) -> NSRect {
         let col = dayColumn(day: day)
         let top = headerRect.minY          // 表头底边
-        let bottom = gridOrigin.y          // 网格底边
-        return NSRect(x: col.x, y: bottom, width: col.width, height: top - bottom)
+        // 展开态：到网格底边；折叠态：网格被裁掉了，面板按**满列高**往下伸
+        // （会伸出卡片，靠网页里的 `.card.collapsed { overflow: visible }` 放行）。
+        let height: CGFloat
+        if collapse > 0.5 {
+            height = dataHeight + gapScaled
+        } else {
+            height = top - gridOrigin.y
+        }
+        return NSRect(x: col.x, y: top - height, width: col.width, height: height)
     }
 
     /// 某一天（1=周一 ... 7=周日）的列 x 坐标与宽度。

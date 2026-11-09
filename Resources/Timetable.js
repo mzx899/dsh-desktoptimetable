@@ -190,6 +190,13 @@
 
   // ---- 与原生通信 ----
   function post(action, payload) {
+    if (typeof window !== 'undefined' && window.__ttPostTrace &&
+        (action === 'textInputBlur' || action === 'textInputFocus')) {
+      try {
+        window.__ttPostTrace.push(action + '@' + Math.round(performance.now()) +
+          ':' + (new Error()).stack.split('\n').slice(1, 3).join(' <- '));
+      } catch (e) {}
+    }
     // 自检用：记下最近一次发给原生的 intent（只存在网页内存里，不影响流程）。
     // `--verify-day-panel` 靠它确认「点添加待办」立刻发了 `todoCompose`。
     //
@@ -198,7 +205,10 @@
     // 永远看不到真正要验的动作。原始消息另存一份给需要看焦点的用例。
     var entry = { action: action, payload: payload || null };
     window.__ttLastAnyPost = entry;
-    if (action !== 'textInputFocus' && action !== 'textInputBlur') {
+    // ⚠️ `panelRect` 是**几何回报**（原生算悬停 / 穿透用），不是用户意图 ——
+    // 也写进 `__ttLastPost` 的话，自检里「最后发的意图是什么」全被它顶掉。
+    if (action !== 'textInputFocus' && action !== 'textInputBlur'
+        && action !== 'panelRect') {
       window.__ttLastPost = entry;
     }
     try {
@@ -932,7 +942,7 @@
     var t = timeInputsOf(kind);
     var el = part === 'hour' ? t.hour : t.minute;
     if (el) {
-      try { el.focus(); } catch (e) {}
+      try { el.focus(); el.select(); } catch (e) {}
     }
   }
 
@@ -980,7 +990,14 @@
       if (kind === 'add' && !DP.adding) return;
       if (kind === 'edit' && !DP.editingTodoKey) return;
       var active = document.activeElement;
-      var formSelector = kind === 'add' ? '.dpinput' : '.dpedit';
+      // ⚠️ **类名要对**（2026-11-09 修）。
+      //
+      // 以前写的是 `.dpinput`，但添加态表单的根类其实是 **`.dpaddform`**
+      // （`.dpinputrow` 只是里面那一行的类）—— 选择器**永远匹配不上**，
+      // 于是「用户还在表单里」这个判断从来没成立过：
+      // 从时框点到分框（焦点还在表单里）也会被判成「离开了输入区」→
+      // 时间非法时就地弹红字。
+      var formSelector = kind === 'add' ? '.dpaddform' : '.dpedit';
       if (active && active.closest && active.closest(formSelector)) return;
       var parts = kind === 'add'
         ? parseTodoTimeParts(DP.timeHourValue, DP.timeMinuteValue)
@@ -1009,6 +1026,24 @@
       autocomplete: 'off',
       spellcheck: 'false',
       'data-dp-time-part': kind + '-' + part,
+      // ⚠️ 卡片上的点击是原生**合成**转发的（`dispatchEvent(new MouseEvent('click'))`），
+      // 合成点击**不会自动聚焦**输入框 —— 以前点上去没光标、打字自然没反应。
+      // 这里显式聚焦 + 全选（打字直接覆盖两位数字），并顺带进入文本输入模式。
+      onclick: function (e) {
+        // ⚠️ **别让点击冒泡到「添加待办」那张卡**（2026-11-09 修）。
+        // 冒泡过去会被当成「点标签 = 重新打开输入框」→ 面板整个重建
+        // → 待办卡片被换掉（看起来消失）+ 时 / 分框失焦 → 键盘断掉。
+        if (e && e.stopPropagation) e.stopPropagation();
+        try { input.focus(); input.select(); } catch (e) {}
+        if (typeof window !== 'undefined' && window.__ttCardLog) {
+          try { window.__ttCardLog.push('onclick focus 后 active=' +
+            (document.activeElement ? (document.activeElement.getAttribute('data-dp-time-part') ||
+             document.activeElement.getAttribute('data-dp-input') ||
+             (document.activeElement.className || document.activeElement.tagName)) : 'none') +
+            '@' + Math.round(performance.now())); } catch (e) {}
+        }
+        post('textInputFocus', {});
+      },
       onfocus: function () {
         post('textInputFocus', {});
       },
@@ -1019,10 +1054,22 @@
           input.value = normalized;
           setTimeValue(kind, part, normalized);
         }
-        post('textInputBlur', {});
-        scheduleTimeBlurValidation(kind);
+        // ⚠️ **焦点还在同一个表单里 → 不要退出文本输入模式**（2026-11-09 修）。
+        //
+        // 时框 → 分框 会先 blur 时框；以前这里无条件 `post('textInputBlur')`
+        // → 原生把键盘收走 → 分框打不了字（「时间输入还是有问题」）。
+        //
+        // 焦点落在**下一个框**上要等下一帧才知道，所以晚一拍再判断。
+        var root = input.closest ? input.closest(kind === 'add' ? '.dpaddform' : '.dpedit') : null;
+        setTimeout(function () {
+          if (focusStillInside(root, input)) return;
+          post('textInputBlur', {});
+          scheduleTimeBlurValidation(kind);
+        }, 0);
       },
       oninput: function () {
+        // 用户开始改时间 → 上一次的红色提示立刻撤掉。
+        if (typeof clearAddError === 'function') clearAddError();
         var raw = input.value;
         // 粘贴 `20:00` / `2000` / `9:5`：一次把两个框都填好。
         if (raw.indexOf(':') >= 0 || raw.replace(/\D/g, '').length > 2) {
@@ -1071,6 +1118,13 @@
           // ↓ 减 1（到头循环）。
           e.preventDefault();
           stepTimePart(kind, part, -1);
+        } else if (e.key === 'ArrowLeft' || e.keyCode === 37) {
+          // ← 跳到「时」；→ 跳到「分」（用户要求：左右键切换时 / 分）。
+          e.preventDefault();
+          focusTimePart(kind, 'hour');
+        } else if (e.key === 'ArrowRight' || e.keyCode === 39) {
+          e.preventDefault();
+          focusTimePart(kind, 'minute');
         } else if ((e.key === 'Backspace' || e.keyCode === 8) && !input.value && other) {
           other.focus();
         } else if (e.key === 'Tab' && !e.shiftKey && isHour && other) {
@@ -1103,7 +1157,12 @@
         post('textInputFocus', {});
       },
       onblur: function () {
-        post('textInputBlur', {});
+        // ⚠️ 焦点还在同一个表单里 → 不要退出文本输入模式（2026-11-09 修）。
+        var root = input.closest ? input.closest('.dpedit') : null;
+        setTimeout(function () {
+          if (focusStillInside(root, input)) return;
+          post('textInputBlur', {});
+        }, 0);
       },
       oninput: function () {
         DP.editTitleValue = input.value;
@@ -1650,18 +1709,20 @@
       //   · 提交 = **回车**（标题框、时间框里回车都能提交）。
       //
       // 编辑态那边是「保存 / 取消」，这里也是「取消」，两个表单语义统一了。
-      var inputBody = h('div', { class: 'dpaddform' },
-        h('div', { class: 'dpinputrow' }, input),
-        h('div', { class: 'dpinputrow dptimerow' },
-          hourInput,
-          h('span', { class: 'dpcolon', text: ':' }),
-          minuteInput,
-          h('span', {
-            class: 'dpok', text: '取消',
-            title: '放弃这次输入（回车提交）',
-            onclick: (function () { return function (e) { e.stopPropagation(); closeTodoCompose(); }; })()
-          })));
-      out.push(dpCard('ghost', null, inputBody, { nodeKey: 'add' }));
+      //
+      // ⚠️⚠️ **表单 DOM 建一次就留着**（2026-11-09 修）。
+      //
+      // 以前每次重绘都 `h('div', ..., input)` 重新拼一个表单 ——
+      // `h()` 会把 `input`（**共享的那个元素**）从旧表单里**摘走**挂到新表单上
+      // → 旧表单里就没有输入框了，而且这次「搬家」会让它**失焦** →
+      // `onblur` → `post('textInputBlur')` → 原生退出文本输入模式 →
+      // **键盘断掉**（用户原话：「输入框出现了但是键盘无法聚焦」）。
+      //
+      // 原生一退出输入模式就要重新抢 key（重试 4 秒，期间窗口被反复摆到前面）
+      // → **用户的点击被吃掉**（「取消要点两次」）。
+      //
+      // 现在：表单只建一次；重绘时**只更新值**，元素一个都不动。
+      out.push(updateAddCard(ensureAddForm(input, hourInput, minuteInput)));
       // 输入框就地展开后自动聚焦。
       //
       // ⚠️ `focus()` 只在窗口是 **key window** 时才有效 ——
@@ -1671,40 +1732,7 @@
       // 这里再补一次 focus() 就成了。
       setTimeout(function () { try { input.focus(); } catch (e) {} }, 60);
     } else {
-      out.push(dpCard('ghost', null,
-        h('div', { class: 'dpadd' },
-          h('span', { class: 'plus', text: '＋' }),
-          h('span', { text: '添加待办' })),
-        {
-          title: '添加待办',
-          nodeKey: 'add',
-          onclick: (function () {
-            return function (e) {
-              e.stopPropagation();
-              // ⚠️ **点「添加待办」就立刻把权限处理掉**（2026-11 修）。
-              //
-              // 以前只有回车提交（`todoAdd`）时才请求提醒事项 / 日历权限：
-              // 用户打完字按回车，系统权限框才弹出来，待办要等授权完
-              // 才出现 —— 第一次用时看起来像「回车没反应」。
-              //
-              // 「点添加待办」已经是明确的意图，这时候就发 `todoCompose`，
-              // 原生立即弹权限框；等用户打完字，权限早就处理完，回车直接写入。
-              post('todoCompose', { day: day });
-              DP.adding = true;
-              // 重新打开输入框时**清掉上次的残留内容** ——
-              // 输入框是复用的同一个元素，不清的话会带着上次没提交的字。
-              DP.inputValue = '';
-              DP.timeHourValue = '';
-              DP.timeMinuteValue = '';
-              if (DP.input) DP.input.value = '';
-              if (DP.timeHour) DP.timeHour.value = '';
-              if (DP.timeMinute) DP.timeMinute.value = '';
-              // 打开输入框 = 用户要重来一次 → 旧的失败提示先清掉。
-              DP.addError = '';
-              renderPanel();
-            };
-          })()
-        }));
+      out.push(updateAddCard(null));
     }
 
     // ⚠️ **失败提示**（2026-11 加）——
@@ -1762,6 +1790,168 @@
     return dpCard('todo', dpCardHead('📋', '修改待办'), body, opts);
   }
 
+  // 「添加待办」那张**稳定的**卡（2026-11-09 加）。
+  //
+  // ⚠️ 为什么必须稳定：这张卡里装着**共用的 input 元素**。
+  // 每次重绘都新建一张卡 → input 被「摘下来再挂回去」→ **失焦** →
+  // `onblur` → `post('textInputBlur')` → 原生退出文本输入模式 →
+  // **键盘断掉**（用户原话：「输入框出现了但是键盘无法聚焦」）。
+  //
+  // 稳定之后：卡和 input 都不动，重绘只更新卡里的值（值本来就是同一个元素，没丢）。
+  //
+  // 这张卡同时装**两种形态**，用 `display` 切换：
+  //   · 收起态：`.dpadd`（「＋ 添加待办」）
+  //   · 展开态：`.dpaddform`（标题框 + 时分 + 取消）
+  // 两种形态都**建一次就留着**，来回切换只改 display —— 元素一动都不动。
+  var DP_addCard = null;        // 那张稳定的卡（.dpcard.ghost）
+  var DP_addCollapsed = null;   // 收起态：.dpadd
+  var DP_addExpanded = null;    // 展开态：.dpaddform
+
+  /// 「添加待办」的表单 DOM（**建一次就留着**，重绘时只更新值）。
+  var DP_addForm = null;
+
+  /// 焦点是不是**还在同一个表单里**（没离开）。
+  ///
+  /// ⚠️ 为什么需要它（2026-11-09 修「时间输入不了 / 输入不连贯」）：
+  ///
+  /// 标题框 → 时框 → 分框 之间来回切，**每个框都会先 blur 再 focus**。
+  /// 以前每个框的 `onblur` 都**无条件** `post('textInputBlur')` →
+  /// 原生 `setTextInputMode(false)` → **键盘断掉**（焦点刚落到下一个框，
+  /// 键盘已经被收走了）→ 后面那个框根本打不了字。
+  ///
+  /// 现在：只有**真的离开整个表单**了才告诉原生退出文本输入模式。
+  ///
+  /// - Parameter root: 表单的根节点（`.dpaddform` / `.dpedit`）。
+  /// - Parameter from: 刚失焦的那个元素。
+  function focusStillInside(root, from) {
+    if (typeof window !== 'undefined' && window.__ttGuardLog) {
+      try {
+        var a = document.activeElement;
+        window.__ttGuardLog.push('guard:' + (from ? (from.getAttribute('data-dp-time-part') ||
+            from.getAttribute('data-dp-input') || (from.className || from.tagName)) : '?') +
+          ' active=' + (a ? (a.getAttribute('data-dp-time-part') || a.getAttribute('data-dp-input') ||
+            (a.className || a.tagName)) : 'none') +
+          ' root=' + (root ? (root.className || root.tagName) : 'null') +
+          ' inside=' + (!!(a && a !== document.body && root && root.contains(a))));
+      } catch (e) {}
+    }
+    // 失焦时 `document.activeElement` 可能已经是 body（焦点还没落到下一个框），
+    // 这时**不能**立刻判成「离开了」—— 要等下一个 tick 看焦点落到了哪。
+    var active = document.activeElement;
+    if (active && active !== document.body && root && root.contains(active)) return true;
+    // 焦点还在**同一个表单**里（说明只是框之间切换）？
+    if (active && from && from.parentNode && from.parentNode.contains &&
+        from.parentNode.contains(active)) return true;
+    return false;
+  }
+
+  /// 拿到（或建）那个**稳定的**表单节点。
+  ///
+  /// ⚠️ 绝不能每次重绘都重新 `h(...)` —— 那样会把**共享的 input 元素**
+  /// 从旧表单里摘走（搬家 → 失焦 → 键盘断掉）。
+  function ensureAddForm(input, hourInput, minuteInput) {
+    if (!DP_addForm) {
+      DP_addForm = h('div', { class: 'dpaddform' },
+        h('div', { class: 'dpinputrow' }, input),
+        h('div', { class: 'dpinputrow dptimerow' },
+          hourInput,
+          h('span', { class: 'dpcolon', text: ':' }),
+          minuteInput,
+          h('span', {
+            class: 'dpok', text: '取消',
+            title: '放弃这次输入（回车提交）',
+            onclick: (function () { return function (e) { e.stopPropagation(); closeTodoCompose(); }; })()
+          })));
+    }
+    return DP_addForm;
+  }
+
+  /// 拿到（或建）那张稳定的「添加待办」卡，并切到对应形态。
+  ///
+  /// - Parameter body: 展开态的表单节点（`null` = 收起态）。
+  function updateAddCard(body) {
+    if (typeof window !== 'undefined' && window.__ttCardLog) {
+      try { window.__ttCardLog.push('updateAddCard body=' + (body ? 'form' : 'null') +
+        ' adding=' + DP.adding + '@' + Math.round(performance.now()) + ':' +
+        (new Error()).stack.split('\n').slice(1,3).join(' <- ')); } catch (e) {}
+    }
+    if (!DP_addCard) {
+      // 收起态：点击它 = 打开输入框。
+      DP_addCollapsed = h('div', { class: 'dpadd' },
+        h('span', { class: 'plus', text: '＋' }),
+        h('span', { text: '添加待办' }));
+      DP_addCard = dpCard('ghost', null, DP_addCollapsed, {
+        title: '添加待办',
+        nodeKey: 'add',
+        onclick: (function () {
+          return function (e) {
+            e.stopPropagation();
+            // ⚠️⚠️ **只有点在「＋ 添加待办」那个标签上才打开输入框**（2026-11-09 修）。
+            //
+            // 这张卡现在是**稳定节点**，里面装着**展开态的表单**（标题框 + 时分 + 取消）。
+            // 以前每次重绘都重建这张卡，展开态的表单和收起态是**两个不同的节点**，
+            // 点表单不会被这张卡接住。
+            //
+            // 改成稳定节点之后，**点表单里的时 / 分框也会冒泡到这张卡** →
+            // 触发「重新打开输入框」→ `renderPanel()` → **面板整个重建**
+            //   · 面板里的待办卡片被换掉 → 用户看到「上面的待办事项没了」；
+            //   · 时 / 分框被摘下来再挂回去 → **失焦** → 键盘断掉
+            //     → 用户看到「时间输入不了 / 输入不连贯」。
+            //
+            // 实测事件序列（点时框）：
+            //   focus:add-hour → blur:add-hour（6ms 后）→ 焦点跑了 → 键盘断
+            //
+            // 修法：只有点在收起态的标签（`.dpadd`）上才当作「打开输入框」。
+            // 表单里的点击一律不管（输入框自己的 handler 处理）。
+            if (e.target && e.target.closest && e.target.closest('.dpaddform')) return;
+            if (DP.adding) return;
+            // ⚠️ **点「添加待办」就立刻把权限处理掉**（2026-11 修）。
+            //
+            // 以前只有回车提交（`todoAdd`）时才请求提醒事项 / 日历权限：
+            // 用户打完字按回车，系统权限框才弹出来，待办要等授权完
+            // 才出现 —— 第一次用时看起来像「回车没反应」。
+            //
+            // 「点添加待办」已经是明确的意图，这时候就发 `todoCompose`，
+            // 原生立即弹权限框；等用户打完字，权限早就处理完，回车直接写入。
+            post('todoCompose', { day: currentAddDay() });
+            DP.adding = true;
+            // 重新打开输入框时**清掉上次的残留内容** ——
+            // 输入框是复用的同一个元素，不清的话会带着上次没提交的字。
+            DP.inputValue = '';
+            DP.timeHourValue = '';
+            DP.timeMinuteValue = '';
+            if (DP.input) DP.input.value = '';
+            if (DP.timeHour) DP.timeHour.value = '';
+            if (DP.timeMinute) DP.timeMinute.value = '';
+            // 打开输入框 = 用户要重来一次 → 旧的失败提示先清掉。
+            DP.addError = '';
+            renderPanel();
+          };
+        })()
+      });
+    }
+    if (body) {
+      // 展开态：表单节点是**稳定的那个**（`ensureAddForm`），
+      // 只需要把它挂进卡里 + 切显示，**不碰里面的任何元素**。
+      if (DP_addExpanded !== body) {
+        DP_addExpanded = body;
+        DP_addCard.appendChild(DP_addExpanded);
+      }
+      if (DP_addCollapsed) DP_addCollapsed.style.display = 'none';
+      DP_addExpanded.style.display = '';
+    } else {
+      // 收起态：只切显示，**不碰表单里的任何元素**。
+      if (DP_addCollapsed) DP_addCollapsed.style.display = '';
+      if (DP_addExpanded) DP_addExpanded.style.display = 'none';
+    }
+    return DP_addCard;
+  }
+
+  /// 「＋ 添加待办」那一列是哪天（点它的时候要知道往哪列加）。
+  function currentAddDay() {
+    return DP.day || 1;
+  }
+
   // 拿到（必要时创建）那个**共用的**输入框元素。
   //
   // ⚠️ 关键点：**只创建一次**，之后每次重绘都复用同一个元素 ——
@@ -1784,15 +1974,33 @@
       //
       // 这里在聚焦时告诉原生「用户要打字了」，原生把窗口临时变成 key，
       // 按键就能进网页了；失焦（或者回车 / Esc）再还原。
+      // ⚠️ 点标题框也要**阻止冒泡**（2026-11-09 修）——
+      // 否则会冒到「添加待办」那张卡 → 面板重建 → 焦点丢失。
+      onclick: function (e) {
+        if (e && e.stopPropagation) e.stopPropagation();
+        try { input.focus(); } catch (err) {}
+      },
       onfocus: function () {
         DP.inputValue = input.value;
         post('textInputFocus', {});
       },
       onblur: function () {
         DP.inputValue = input.value;
-        post('textInputBlur', {});
+        // ⚠️ **焦点还在同一个表单里 → 不要退出文本输入模式**（2026-11-09 修）。
+        //
+        // 标题框 → 时框 会先 blur 标题框；以前无条件 `post('textInputBlur')`
+        // → 原生把键盘收走 → 时框打不了字（「时间输入还是有问题」）。
+        var root = input.closest ? input.closest('.dpaddform') : null;
+        setTimeout(function () {
+          if (focusStillInside(root, input)) return;
+          post('textInputBlur', {});
+        }, 0);
       },
-      oninput: function () { DP.inputValue = input.value; },
+      oninput: function () {
+        DP.inputValue = input.value;
+        // 开始改标题 → 上一次的红色提示撤掉。
+        if (typeof clearAddError === 'function') clearAddError();
+      },
       onkeydown: function (e) {
         e.stopPropagation();
         DP.inputValue = input.value;
@@ -1810,14 +2018,50 @@
     return input;
   }
 
+  // Esc 的统一出口（原生 AppKit 的 cancelOperation 也调这里）。
+  //
+  // ⚠️ 为什么不能只靠输入框自己的 onkeydown（2026-11-08 修「Esc 要按两下」）：
+  //   · 窗口刚被切成 key 时，第一下 Esc 可能被 AppKit 的取消链路
+  //     （`cancelOperation`）先接走，根本没到 DOM；
+  //   · 用中文输入法时，第一下 Esc 是「取消组词」，属于输入法自己。
+  // 所以再挂一个**文档级**兜底 + 给原生一个直接调用的入口。
+  window.ttCancelEditing = function () {
+    if (DP.adding) { closeTodoCompose(); return true; }
+    if (DP.editingTodoKey) { cancelTodoEdit(); return true; }
+    return false;
+  };
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape' && e.keyCode !== 27) return;
+    // 输入法正在组词 → 这一下先让输入法自己取消。
+    if (e.isComposing || e.keyCode === 229) return;
+    if (DP.adding || DP.editingTodoKey) {
+      e.preventDefault();
+      window.ttCancelEditing();
+    }
+  }, false);
+
   // 收起「添加待办」输入区（Esc / 空标题 / 提交成功共用）。
   function closeTodoCompose() {
     DP.adding = false;
     DP.inputValue = '';
     DP.timeHourValue = '';
     DP.timeMinuteValue = '';
+    // ⚠️ **取消 / 收起时必须清掉失败提示**（2026-11-09 修）
+    // 以前只在「提交成功」那条路上清，于是「时间填错 → 取消添加」之后
+    // 红色提示会一直挂在面板上（用户：「取消了添加待办还在」）。
+    DP.addError = '';
     post('textInputBlur', {});
     renderPanel();
+  }
+
+  /// 用户一开始改输入内容，就把上一次的失败提示撤掉。
+  /// 只摘 DOM 节点、不整块重绘 —— 重绘会把输入框重新挂一遍，焦点 / 输入法就断了。
+  function clearAddError() {
+    if (!DP.addError) return;
+    DP.addError = '';
+    var el = document.querySelector('.dpadderr');
+    if (el && el.parentNode) el.parentNode.removeChild(el);
   }
 
   function commitTodo(day, input) {
@@ -2012,9 +2256,13 @@
       var key = node.getAttribute('data-node-key') || '';
       if (node.__dpSig === undefined) node.__dpSig = node.outerHTML;
       var keep = node;
-      // ⚠️ 输入框那张卡不能复用：建新节点时，**共享的 input 元素**
-      // 已经从旧卡里搬进新卡了，旧卡再用就是一张没有输入框的空壳。
-      if (key && key !== 'add' && key.indexOf('edit:') !== 0 &&
+      // ⚠️ 「添加待办」那张卡**已经是稳定节点**了（`updateAddCard` 建一次就留着），
+      // 所以它可以正常复用 —— 复用它的意义就是**别把 input 元素搬走**
+      // （搬走 → 失焦 → 原生退出文本输入模式 → 键盘断掉，2026-11-09 修）。
+      //
+      // 编辑态那张卡（`edit:*`）**仍然不能复用**：它里面的标题框是
+      // 「就地编辑」用的独立元素，建新节点时会被搬进新卡。
+      if (key && key.indexOf('edit:') !== 0 &&
           oldByKey[key] && !used[key] &&
           oldByKey[key].__dpSig === node.__dpSig) {
         keep = oldByKey[key];
@@ -2179,6 +2427,17 @@
       restoredFocus = true;
       setTimeout(function () {
         try {
+          // ⚠️⚠️ **已经有焦点了就别再 focus()**（2026-11-09 修「时间输入不了」）。
+          //
+          // 在**已经拿到焦点**的 input 上再调一次 `focus()`，
+          // WebKit 会走一遍「先失焦再聚焦」——
+          // 那个**多余的 blur** 会让网页侧的失焦守卫看到 `activeElement = body`
+          // → 判定成「用户离开了输入区」→ `post('textInputBlur')`
+          // → 原生退出文本输入模式 → **键盘断掉**。
+          //
+          // 实测：点「分」框之后 800ms，原生推来一次状态 →
+          // `renderPanel` 的焦点还原又 focus 了一次 → 分框立刻失焦 → 键盘没了。
+          if (document.activeElement === inputFocusTarget) return;
           if (inputFocusTarget === DP.input) DP.input.focus();
           else inputFocusTarget.focus();
         } catch (e) {}
@@ -2210,16 +2469,27 @@
   // 现在：render() 之前把元素从旧 grid 上「摘下来」（JS 引用还在），
   // render() 之后重新 append 到**新的** grid —— 同一个元素、
   // 同一份内容节点，动画状态不重置。
+  /// 覆盖层挂在谁身上：
+  ///   · 展开态 → `.grid`（原来的定位原点）；
+  ///   · 折叠态 → **卡片**：`.gridwrap` 只有 38px 高，挂在里面会被裁掉，
+  ///     面板要伸到卡片外面，只能挂卡片（`.card` 本身 position: relative）。
+  function panelHost() {
+    var card = document.querySelector('.ttcard.card');
+    if (collapseProgress > 0.5 && card) return card;
+    return document.querySelector('.grid');
+  }
+
   function buildPanel() {
     var grid = document.querySelector('.grid');
-    if (!grid) return;
+    var host = panelHost();
+    if (!grid || !host) return;
 
     // 元素还在（可能被 render 摘掉了）→ 复用，只重新挂到新 grid 上。
     if (DP.el) {
       var b = DP.el.querySelector('.dpbody');
       var f = DP.el.querySelector('.dpfade');
       if (b && f) {
-        if (DP.el.parentNode !== grid) {
+        if (DP.el.parentNode !== host) {
           // ⚠️ **挂回去之前先关掉过渡** ——
           // 元素在被摘掉的这段时间里，class 可能被改过（比如摘了 show）。
           // 重新挂上时如果 transition 还在跑，浏览器会把它当成「从旧值过渡到新值」
@@ -2249,7 +2519,7 @@
           if (!animating) {
             DP.el.classList.add('dpnoreplay');
           }
-          grid.appendChild(DP.el);
+          host.appendChild(DP.el);
           // 强制回流，让「无过渡」的终态生效
           void DP.el.offsetHeight;
           if (!animating) {
@@ -2270,7 +2540,7 @@
     var el = h('div', { class: 'daypanel' },
       h('div', { class: 'dpbody' }),
       h('div', { class: 'dpfade' }));
-    grid.appendChild(el);
+    host.appendChild(el);
     DP.el = el;
     DP.grid = grid;
     DP.body = el.querySelector('.dpbody');
@@ -2280,22 +2550,51 @@
   // 把覆盖层放到某一列上（按几何定位）
   function positionPanel() {
     if (DP.day === null || !DP.el) return;
-    var geom = gridGeom();
-    var col = columnGeom(DP.day);
-    if (!geom || !col) return;
-
     var el = DP.el;
-    el.style.left = col.x + 'px';
-    el.style.top = geom.headerBottom + 'px';
+    var host = el.parentNode;
+    var grid = DP.grid || document.querySelector('.grid');
+    var hdr = document.querySelector('.hcell[data-day="' + DP.day + '"]');
+    if (!host || !grid || !hdr) return;
 
+    // 用「宿主 / 表头格」的视口矩形相减 → 宿主坐标系里的位置（CSS px）。
+    // 这样不管宿主是 `.grid`（展开）还是 `.card`（折叠）都成立，
+    // pageZoom / transform 两种档位也都不用单独判断（除一下倍率即可）。
+    var s = layoutScale();
+    var hb = host.getBoundingClientRect();
+    var cb = hdr.getBoundingClientRect();
+
+    el.style.left = ((cb.left - hb.left) / s) + 'px';
+    el.style.top = ((cb.bottom - hb.top) / s) + 'px';
     // 宽度 = 单列宽度（**只有这一种形态**，2026-11 去掉宽态）。
-    el.style.width = col.w + 'px';
+    el.style.width = (cb.width / s) + 'px';
     el.style.right = 'auto';
-    // 覆盖层总高 = 满列高（表头之下那一列的高度）
-    var full = Math.max(0, geom.height - geom.headerBottom);
+
+    // 覆盖层总高 = 满列高（表头之下那一列的高度，版式 px）——
+    // 折叠态照旧用这个高度：面板会**伸出卡片**，靠 `.card.collapsed`
+    // 的 `overflow: visible` 放行。
+    if (!grid.__ttFullH) grid.__ttFullH = grid.offsetHeight;
+    var head = 38;
+    var full = Math.max(0, (grid.__ttFullH || 0) - head);
     el.style.height = full + 'px';
     // 渐变尾巴：实心区高度自适应，剩下的往下一直渐变到底
     layoutFade();
+
+    // ⚠️ **把面板的真实矩形报给原生**（2026-11）。
+    //
+    // 悬停判定 / 点击穿透要用「面板到底盖住了哪一块」。原生自己也有一套
+    // 几何（`TimetableLayout.dayPanelRect`），但那套只认「展开时的网格」——
+    // 折叠 + 缩放 / 不同宿主下会差一点，差出去的那条缝就表现为
+    // 「鼠标移到日历上，整个课表淡出」。
+    //
+    // 这里直接报 `getBoundingClientRect()`（已含 translate / 缩放前的 CSS px），
+    // 原生按当前倍率换算成窗口坐标即可，两边永远是同一块矩形。
+    // 只报 `getBoundingClientRect()` 原始值：
+    //   · transform 档它已经是**视觉** CSS px（含 translate / scale），倍率 1；
+    //   · pageZoom 档它是版式 CSS px，原生再乘 pageZoom。
+    // 原生用 `testRectScale` 一个系数就够（和 `arrowCenter` 那套换算一致）。
+    var pr = el.getBoundingClientRect();
+    post('panelRect', { l: pr.left, t: pr.top, w: pr.width, h: pr.height,
+                        day: DP.day, open: true });
   }
 
   // 实心区高度自适应 + 渐变区补到底
@@ -2917,11 +3216,9 @@
   // ---- 表头点击 / 双击 ----
 
   function onHeaderPick(day) {
-    // 折叠态：网格都没了，点表头先展开（展开完原生会把这一列的覆盖层打开）。
-    if (collapseProgress > 0.5) {
-      post('toggleCollapse', { day: day });
-      return;
-    }
+    // ⚠️ 折叠态**不再先展开**（2026-11 用户要求）：
+    // 点日期直接弹日期覆盖层（日历 + 待办），面板从折叠条底下伸出来。
+    // 以前是「先展开，展开完原生再打开面板」—— 用户觉得「点个日期课表先跳开」很别扭。
     // 再点**同一列**的日期 → 直接关闭（窄态宽态都算）。
     //
     // ⚠️ 以前这里有个条件（只在宽态才关）—— 窄态下再点同一列只会
@@ -3309,9 +3606,13 @@
 
   // ---- 渲染 ----
   function render() {
-    window.__ttRenderWeek = (typeof S.viewWeek === 'number') ? S.viewWeek : null;
+    // ⚠️ **必须先判空再解引用**（2026-11-09 修「时钟不走」）：
+    // 启动时脚本尾部那次 render() 跑在状态到达之前，`S` 还是 undefined；
+    // 旧写法先去读 `S.viewWeek` 直接抛 TypeError → 把后面「装时钟定时器」
+    // 那段一起中断 → 时钟只在下次推状态时才更新（用户：「时间一直对不上」）。
     window.__ttRenderCount = (window.__ttRenderCount || 0) + 1;
     if (!S) return;
+    window.__ttRenderWeek = (typeof S.viewWeek === 'number') ? S.viewWeek : null;
     var root = document.getElementById('root');
     if (!root) return;
 
@@ -3768,6 +4069,9 @@
 
     root.innerHTML = '';
     root.appendChild(card);
+    // 新 DOM 是「展开」模板 → 按当前折叠进度重新套一遍
+    // （否则折叠态下原生一推状态，卡片会先弹开一下再收回去）。
+    applyCollapse();
 
     // 覆盖层跟着重绘走：重画完把它挂回新 grid 并定位，
     // 否则原生一推状态（翻周 / 改设置）覆盖层就没了。
@@ -3844,6 +4148,17 @@
     var p = collapseProgress;
     wrap.style.height = (head + (full - head) * (1 - p)) + 'px';
     card.style.setProperty('--tt-collapse', String(p));
+    // 折叠态：卡片要让日期覆盖层伸出来（CSS 里 `.card.collapsed`）。
+    var wasCollapsed = card.classList.contains('collapsed');
+    card.classList.toggle('collapsed', p > 0.5);
+    // 跨过一半 → 覆盖层的宿主在 `.grid` / `.card` 之间换一次，并重新定位。
+    if (wasCollapsed !== (p > 0.5) && DP.el) {
+      var host = panelHost();
+      if (host && DP.el.parentNode !== host) {
+        host.appendChild(DP.el);
+      }
+      positionPanel();
+    }
     var btn = card.querySelector('.collapsebtn');
     if (btn) {
       btn.classList.toggle('collapsed', p > 0.5);
@@ -3898,6 +4213,14 @@
     //
     // 原生每次「系统数据变了」都会把 `dayPanelRevision` 加一，
     // 这里看到变了就清空缓存；面板开着 / 跟随中时立刻重新要这一天。
+    // 「取消添加 / 编辑」令牌（原生按 Esc 时加一）：号码变了就取消。
+    //
+    // ⚠️ 为什么不靠 DOM 的 keydown：窗口刚变 key 时第一下 Esc 会被系统吃掉，
+    // 网页根本收不到。状态推送是每轮都在走的通道，这里才靠得住。
+    if (typeof next.cancelCompose === 'number' && next.cancelCompose !== DP.cancelCompose) {
+      DP.cancelCompose = next.cancelCompose;
+      if (window.ttCancelEditing) window.ttCancelEditing();
+    }
     // 固定状态随状态快照一起来（重建 DOM 后图钉不会回到默认态）。
     if (typeof next.pinned === 'boolean' && next.pinned !== pinPinned) {
       pinPinned = next.pinned;
@@ -4220,6 +4543,22 @@
   window.__ttDiagMove = function (x, y) { onPointerMove({ clientX: x, clientY: y }); };
   window.__ttDiagClick = function (day) { onHeaderPick(day); };
 
+  // 原生 / 自检查询：「添加待办」的输入区**开着没有**。
+  //
+  // ⚠️ **必须看可见性，不能只看元素在不在**（2026-11-09 起）。
+  //
+  // 「添加待办」的表单现在是**稳定元素**（建一次就留着），
+  // 收起时只是被 `display:none` 藏起来 —— 元素还在 DOM 里。
+  // 所以 `!!document.querySelector('.dpaddform')` 永远是 true，
+  // 判断「开着没有」要用可见性。
+  window.ttAddFormVisible = function () {
+    var form = document.querySelector('.dpaddform');
+    if (!form) return false;
+    if (form.offsetParent === null) return false;
+    var r = form.getBoundingClientRect();
+    return r.height > 0 && r.width > 0;
+  };
+
   // 原生查询：当前是否有覆盖层、是哪一列、什么状态
   window.ttDayPanelIsOpen = function () {
     return {
@@ -4231,6 +4570,7 @@
   // 原生强制收起（拖动课表时用）
   window.ttDayPanelClose = function () {
     closePanel(true);
+    post('panelRect', { open: false });
   };
 
   // 原生回报「添加待办」的结果（2026-11 加）。
@@ -4376,15 +4716,25 @@
     };
   }
 
-  render();
-  // 时钟 / 状态条自己走表：原生推送在数据没变时不会重画顶部（否则表头又要闪），
-  // 所以不能让它们等推送来刷新。
-  setInterval(updateLiveTexts, 10000);
-  // 页面从后台回来（例如显示器休眠后唤醒）立刻对一次表。
-  document.addEventListener('visibilitychange', function () {
-    if (!document.hidden) updateLiveTexts();
-  });
-  // 自检入口：立刻刷新一次顶部文字，并标记定时器已装上。
-  window.__ttUpdateClock = updateLiveTexts;
-  window.__ttClockTimer = true;
+  // ⚠️ 启动阶段的异常**必须记下来**：以前这里直接调，哪里抛一下，
+  // 后面的定时器就全不装了（表现为「时钟永远停在某一刻」）。
+  try {
+    render();
+  } catch (e) {
+    window.__ttBootError = 'render: ' + String((e && e.stack) || e);
+  }
+  try {
+    // 时钟 / 状态条自己走表：原生推送在数据没变时不会重画顶部（否则表头又要闪），
+    // 所以不能让它们等推送来刷新。
+    setInterval(updateLiveTexts, 10000);
+    // 页面从后台回来（例如显示器休眠后唤醒）立刻对一次表。
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) updateLiveTexts();
+    });
+    // 自检入口：立刻刷新一次顶部文字，并标记定时器已装上。
+    window.__ttUpdateClock = updateLiveTexts;
+    window.__ttClockTimer = true;
+  } catch (e) {
+    window.__ttBootError = (window.__ttBootError || '') + ' tail: ' + String((e && e.stack) || e);
+  }
 })();

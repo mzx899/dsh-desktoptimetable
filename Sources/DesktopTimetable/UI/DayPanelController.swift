@@ -251,7 +251,19 @@ final class DayPanelController {
             self.eventStore = eventStore
         } else if AutomationMode.isCurrentProcessAutomation {
             // 自动化模式：注入空实现，绝不碰真实日历 / 提醒事项。
-            self.eventStore = EmptyEventKitStore()
+            //
+            // ⚠️ `--verify-todo-focus` 例外（2026-11-09）：它要验
+            // 「输入时间时上面的**待办事项**不能消失」，空 store 里 0 条
+            // 待办 → 断言恒真 = 没验。所以按它自己的报告变量认领，
+            // 塞一条假待办进去（绝不影响别的自检）。
+            let seeded: [DayPanelTodo] = ProcessInfo.processInfo
+                .environment["DT_FOCUS_REPORT"] == nil ? [] : [
+                    DayPanelTodo(title: "自检待办（不能消失）", due: "20:00",
+                                 done: false, dueMinutes: 20 * 60,
+                                 identifier: "seed-todo-1",
+                                 calendarIdentifier: "seed-list")
+                ]
+            self.eventStore = EmptyEventKitStore(seededTodos: seeded)
         } else {
             self.eventStore = EventKitStore()
         }
@@ -2118,12 +2130,26 @@ final class FakeEventKitStore: EventKitStoreProtocol {
 
 /// 自动化模式用的空 EventKit —— 什么都不返回，也绝不碰系统。
 final class EmptyEventKitStore: EventKitStoreProtocol {
+    /// 自检用：**假装当天已经有这几条待办**。
+    ///
+    /// 为什么需要（2026-11-09）：`--verify-todo-focus` 验的是「输入时间时
+    /// 上面的待办事项不能消失」，但临时数据目录里待办是 0 条 →
+    /// 「0 → 0 没变」恒真，这条断言等于**没验**。给它一条假待办，
+    /// 断言才有东西可看。默认空 → 其它 `--verify-*` 完全不受影响。
+    private let seededTodos: [DayPanelTodo]
+
+    init(seededTodos: [DayPanelTodo] = []) {
+        self.seededTodos = seededTodos
+    }
+
     var reminderAuthorization: EKAuthorizationStatus { .denied }
     var eventAuthorization: EKAuthorizationStatus { .denied }
     func requestReminderAccess(completion: @escaping (Bool) -> Void) { completion(false) }
     func requestEventAccess(completion: @escaping (Bool) -> Void) { completion(false) }
     func reminderLists() -> [EventKitListInfo] { [] }
-    func reminders(on date: Date, completion: @escaping ([DayPanelTodo]) -> Void) { completion([]) }
+    func reminders(on date: Date, completion: @escaping ([DayPanelTodo]) -> Void) {
+        completion(seededTodos)
+    }
     func events(on date: Date, completion: @escaping ([DayPanelEvent]) -> Void) { completion([]) }
     func setReminder(_ identifier: String, in calendarIdentifier: String,
                      done: Bool, completion: @escaping (Bool) -> Void) { completion(false) }

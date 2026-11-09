@@ -1,5 +1,429 @@
 # 更新日志 · Changelog
 
+## [未发布]
+
+### 弹窗文案精简：导入决策不再把同一段说明写两遍；删除整门课程的按钮改叫「删除」
+
+用户原话（2026-11-09 晚，附「当前已经有课表了」截图）：
+
+> 「你这种警告的文字叙述太多了，删减一点，让它变得更简约美观，
+> 包括点击删除整门课的时候，红色的按键不要叫删除整门课，就叫删除」
+
+#### 现象
+
+- 导入时「当前已经有课表了」那张弹窗：正文先列了三行清单
+  （`· 覆盖当前课表（推荐）：…`、`· 新建一份独立课表：…`、`· 取消：…`），
+  **下面两张选项卡又把同样的话各写了一遍** → 同一段说明读两遍，弹窗又高又密；
+- 「删除整门课程」确认框正文里「N 条上课时间记录将被删除」说了两遍，
+  红色按钮还重复写着「删除整门课程」（标题里已经有这五个字）。
+
+#### 修复
+
+- `UI/ImportDecisionController.swift`：新增 **`decisionRequest(name:courseCount:loadError:)`**
+  作为**唯一真源** —— 正文只说「「我的课表」里已有 10 门课。」，
+  两张选项卡的说明各一句：
+  - 覆盖：`用导入结果更新当前课表，冲突时再问你`
+  - 新建：`另存一份，当前课表不动`
+
+  读文件出错那种情况保留下三件事（读不到全部 → 能读到几门 → 覆盖前自动备份）。
+- `UI/ScheduleEditorController.swift`：整门课程删除的正文压成两行
+  （`会删掉 N 个上课时间记录，此操作不可撤销。` / `笔记会保留（变成孤立笔记）。`），
+  **红色按钮 `删除整门课程` → `删除`**（标题 `删除整门课程「X」？` 不变，语义没丢）。
+- `main.swift` 的 `--shot-alert-dialog` 增加 `import` / `import-error` 两种出图，
+  直接调用 `decisionRequest` —— 出图和真机**同一份文案**，不会各写一套。
+
+#### 自检
+
+- 出图：`--shot-alert-dialog x import` / `x import-error` / `x course`
+  （真机 `screencapture -l` 抓窗口）：导入弹窗从「正文清单 + 卡片说明」的重复，
+  变成「一行说明 + 两张卡片」；删除整门课程的按钮显示「删除」；
+- `make test`：**2057 项断言全过**；
+- `--verify-import-flow`：通过（覆盖导入 / 逐条冲突 / 写盘 / 焦点恢复）。
+
+### 导入决策的选项卡改成铺满内容区（左右留白对称）
+
+用户原话（2026-11-09 晚）：
+
+> 「这个的覆盖当前课表和新建一份独立的课表，为什么不处于窗口的中间位置，
+> 明显是右边留白更多，左边少」
+
+#### 根因
+
+`AlertDialogController.makeOptions` 只给 **stack** 定了宽度（内容宽 392pt），
+`alignment = .leading`；而 `DialogOptionRow` 是 `NSButton` —— 它的宽度取
+**标题文字的自然宽度**，于是卡片比内容区窄一截、还靠左：
+实测卡片左边缘 49pt、右边缘 686pt（窗口 880/2=440 点宽），右边多出约 70pt 空白。
+
+#### 修复
+
+给每一行加 `row.widthAnchor.constraint(equalToConstant: width)` ——
+选项卡铺满内容宽，左右留白对称（实测左 49 / 右 51 像素，误差来自 1pt 描边）。
+
+#### 自检
+
+- `--shot-alert-dialog x import`：卡片左右留白对称
+  （`docs/archive/shots-1.4.8/导入决策-选项卡居中.png`）；
+- `make test`：**2057 项断言全过**；`--verify-import-flow`：通过。
+
+### 设置 → 课表 →「课表数据」两个按钮：加符号、去省略号、等宽
+
+用户原话（2026-11-09 晚，附截图）：
+
+> 「这个导入课表和在访谈中显示，在他们俩之前加点符号，就是每个之前加一个符号，
+> 然后导入课表，最后把省略号给去掉，并把这两个的框变得一样长」
+
+#### 现象
+
+「导入课表…」和「在访达中显示」是两颗普通 `NSButton`：**没有图标**、
+「导入课表」带省略号、两颗按钮各自按文字自然宽度收缩（一个宽一个窄）。
+
+#### 修复（`UI/SettingsWindowController.swift`）
+
+- 改用 `makeIconButton`（「课表」卡片那排「新建 / 重命名 / 删除 / 管理」同款）：
+  导入课表 = `square.and.arrow.down`，在访达中显示 = `folder`；
+- 标题 `导入课表…` → **`导入课表`**（这里是直接动作，不是「还要问一句」）；
+- 两颗按钮宽度都钉成 `126pt` —— 不再各按文字宽收缩。
+
+#### 自检
+
+- **新增 `--verify-data-buttons`**（只读界面，不触发导入 / 不打开访达）：
+  实测 `导入=「导入课表」图标=true 宽=126 可用=true`、`访达=「在访达中显示」图标=true 宽=126`；
+- `--shot-settings <png> timetable-data` 出新截图
+  （`DT_SHOT_SCREEN=1` 时走 `screencapture -l` 真机抓图；离屏渲染看不到材质，整体发灰）；
+- `make test`：**2062 项断言全过**。
+
+### 导入冲突那个大列表窗口：以前**整页空白**，现在能看见列表了
+
+用户原话（2026-11-09 晚）：
+
+> 「那个在导入课表时检测到有冲突，然后弹出来的一大页的，就是一个大窗口显示的
+> 全部有冲突的列表。那个窗口你能不能调出来」
+
+#### 现象 / 根因
+
+为了把窗口调出来核对外观，先加了 `--shot-import-diff`（走
+`AppDelegate.testStartOverwriteImport` 的**真实接线**，假数据造在 `DT_DATA_DIR`）。
+抓图发现：窗口只有顶部摘要 / 批量按钮 / 底部「取消 / 应用」，**中间列表一片空白**。
+
+探针实测：列表里 **8 行都在**（`fittingSize = 338.5 × 745`），
+但承载它们的 `documentView` frame 是 **(0, 0, 0, 0)** ——
+`scrollView.documentView = stack` 之后没有任何约束 / frame 设置，
+`NSStackView` 自己不会撑开，于是整块列表没有可视区域。
+
+#### 修复（`UI/TimetableDiffWindowController.swift`）
+
+- document view 换成一个**翻转**的容器（`FlippedDocumentView`，`isFlipped = true`），
+  把 `stack` 四边钉在它上面，并让容器宽度跟随 `scrollView.contentView`；
+- 不翻转的话，`NSScrollView` 以左下角为原点，内容高于视口会整体跑到视口上方
+  （实测 `frame.y = -274`，同样是空白）。
+
+#### 自检
+
+- **新增 `--shot-import-diff`**（`DT_DATA_DIR` + `DT_ALERT_SHOT`，
+  可选 `DT_SHOT_SCROLL=bottom` 滚到冲突段）：
+  修复后 `列表：行数=8 frame=(0,0,739,745)`，出图可见「高等数学 / 大学英语 / 物理 /
+  体育 / 军事理论 / 自习 + 时间冲突」全部条目；
+- `--verify-import-flow`：✅ 通过（摘要 / 阻塞原因 / 逐条决定 / 写盘 / 焦点）；
+- `make test`：**2065 项断言全过**。
+
+### 「合并课表差异」窗口：玻璃底 + 边缘假光，列表铺满宽度并改成卡片
+
+用户原话（2026-11-09 晚）：
+
+> 「一二可以按你说的改，并且这个黑色的和现在不搭。我之前把其他的窗口不是都要你
+> 改成了有假光的那风格吗，你可以按照相同的风格，把这个背景进行优化，
+> 然后其他的按你说的来」
+
+（「一二」= ① 每行铺满可用宽度 ② 每门课一块玻璃卡片、冲突段琥珀强调）
+
+#### 修复（`UI/TimetableDiffWindowController.swift`）
+
+- **窗口背景**：不再用默认的纯黑 `NSWindow`，改成
+  `HUDWindow.make`（标题栏透明 + 内容铺满 + 浮动层）+
+  `installContent`（材质 + 边缘假光）+ `installDarkBackdrop`（上浅下深的渐变玻璃底）——
+  和确认框 / 设置面板同一套；
+  摘要行下移 `trafficLightBand + 18`，避开浮在内容上的红绿灯；
+- **列表铺满**：每行包进卡片，卡片宽度 = 列表宽度（以前内容列只有 338pt，
+  窗口 780pt，右边一大片空）；
+- **卡片化**：白 4.5% 玻璃底 + 1pt 描边 + 圆角 10；时间冲突那张用琥珀色描边；
+  行尾分隔线去掉（卡片本身就是边界）。
+
+#### 顺带修的出图链路
+
+- `--shot-import-diff` 的 `DT_SHOT_SCROLL=bottom` 之前找不到滚动视图 ——
+  换成 HUD 玻璃底之后 scroll view 在 root 里、不是 `contentView` 的直接子视图；
+  改成递归查找，并在布局完成后再滚（文档高度是布局后才有的）。
+
+#### 自检
+
+- 出图：`docs/archive/shots-1.4.8/合并课表差异-玻璃卡片.png`、
+  `...-冲突段.png`、`...-桌面实拍.png`（窗口里 6 门课 + 琥珀冲突卡都可见）；
+- `--verify-import-flow`：✅ 通过；`make test`：**2065 项断言全过**。
+
+### 版本
+
+待用户拍板。
+
+## [1.4.7] - 2026-11-09
+
+### 弹窗换外观：深色玻璃底 + 一圈边缘假光
+
+用户原话（2026-11-09 晚，附两张对比图）：
+
+> 「弹出来的这种警告窗口，就是像第一张这样的，把它的外观变成像第二张一样，
+> 就是在边缘处打点假光，然后整个的颜色不要那么的深，稍微有一点点毛玻璃质感」
+
+#### 现象
+
+「删除这一节课？」这类确认框是一块**近实心的深色板**：底色 `α 0.82` 单色、
+四周只有窗口自己裁出来的圆角、没有任何边缘光 —— 压在深色桌面 / 课表上像贴了一张黑纸。
+
+#### 根因
+
+- `HUDWindow.installDarkBackdrop` 往毛玻璃材质上压了一层 **`α 0.82` 单色**，
+  材质几乎被压死（毛玻璃质感出不来），而且顶部和底部一个颜色（没有厚度感）；
+- 窗口完全没有**边缘光**：既没有描边，也没有内高光，暗背景上就看不出「玻璃边」。
+
+#### 修复（`UI/HUDWindow.swift`，全 app 弹窗共享）
+
+1. **`HUDGlassBackdropView`（新）**：底色改成**上浅下深的竖向渐变**
+   （`α 0.86` 深蓝灰，顶 `0.12/0.14/0.20` → 底 `0.06/0.08/0.12`），
+   顶部再叠一层很淡的白色渐变（`α 0.055 → 0`）—— 就是「光从上面来」；
+2. **`HUDGlassRimView`（新）**：一圈 1.2pt 的描边，颜色**上亮下暗**
+   （白 `α 0.45 → 0.26 → 0.14`），用 `CAGradientLayer` + `CAShapeLayer` 描边遮罩实现；
+   `hitTest` 返回 `nil`，只是光、不吃点击；
+3. `installContent` 统一挂上这一层光 → 确认框 / 课程编辑器 / 课程详情 /
+   命名框 / 提前提醒框 / 已完成提醒事项的删除框，**全部**跟着变。
+
+⚠️ 两个踩过的坑（都在代码注释里）：
+- `draw(_:)` + `destinationOut` 挖圆环**在这套层级里会被擦掉**（出图只剩一条顶边带）；
+- 直接 `addSublayer` 不设 `frame` 的渐变是**零尺寸、画不出来**（第一版就是白板）。
+
+#### 自检
+
+- **新增 `--shot-alert-dialog`**：真机抓图 —— `AlertDialogController.makeWindowForTest`
+  建窗 → `orderFrontRegardless` → `/usr/sbin/screencapture -x -o -l<windowNumber>`
+  （⚠️ `displayIgnoringOpacity` / `cacheDisplay` 抓出来都是**白板**：
+  底色 / 假光都在 layer 上，而且毛玻璃要和窗口背后的桌面合成）；
+- 截图结论（`/tmp/final1.png`「删除这一节课？」、`/tmp/final2.png`「删除整门课程…」）：
+  底色上浅下深、四周一圈亮边（顶边最亮）、正文对比度正常；
+  实测像素：内部 `(39,43,53)`、左边 `(99,100,108)`、顶边 `(170,171,176)`、底边 `(57,60,68)`；
+- `make test`：**2057 项断言全过**；
+- 相关自检全过：`--verify-completed-reminders`、`--verify-import-flow`、
+  `--verify-day-panel-click`、`--verify-typing`。
+
+### 版本
+
+**1.4.7** —— 补丁版，**bundle id 不变**（仍为 `com.desktoptimetable.app.v120`）：
+日历 / 提醒事项的授权、登录项、通知身份全部延续，不用重新登记。
+构建已归档到 `版本迭代/DesktopTimetable-1.4.7.app`。
+
+## [1.4.6] - 2026-11-09
+
+### 时间输入：标题 / 时 / 分框之间来回点不再断键盘，上面的待办也不会消失
+
+用户原话（2026-11-09 下午）：
+
+> 「现在时间输入还是有问题，输入也不够连贯，输入时间时上面的待办事项就没了」
+
+#### 现象
+
+- 在「添加待办」里点「时」框 / 「分」框时，**键盘会断**（接着打字没反应、输入法不弹）；
+- 输入时间的过程中，面板里**上面的待办事项整块消失**。
+
+#### 根因（产品侧三条）
+
+1. **时 / 分框的点击冒泡到「添加待办」那张卡** —— 卡片把它当成「点标签 = 重新打开输入框」，
+   `renderPanel` 整树重画 → 待办卡片被换掉（看起来消失）、输入框被摘下来再挂回去（失焦）
+   → `textInputBlur` → 原生退出文本输入模式 → 键盘断。
+2. **时框 → 分框必然会先触发时框的 `onblur`**，以前那里无条件 `post('textInputBlur')`
+   → 原生立刻收键盘 → 分框打不了字（焦点其实还在表单里）。
+3. **「时间非法」的就地校验用了错误的选择器**：写的是 `.dpinput`，而添加态表单根是
+   `.dpaddform` → 「用户还在表单里」这个判断**永远不成立** → 一切换框就弹红字 / 重绘。
+
+#### 修复（产品侧）
+
+- `Resources/Timetable.js` `ensureTimePart()`：时 / 分框的 `onclick` 先 `stopPropagation()`，
+  不再冒泡到卡片；`onblur` 改成**晚一拍判断焦点还在不在同一个表单里**
+  （`focusStillInside(root, input)`），在就**不发** `textInputBlur`；
+- `scheduleTimeBlurValidation()` 的表单选择器改成 `.dpaddform`（添加态）/ `.dpedit`（编辑态）。
+
+#### 修复（自检侧两条 —— 这两条是这轮真正卡住的地方）
+
+1. **「取消」用例插队 → 假红。** `--verify-todo-focus` 里 `timeChecksDone = true`
+   写在了 `step(0.7) { … }` 的**块外**：`step` 只是排期，块还没跑标志就翻了 →
+   「取消」用例 0.2s 后就点下去把输入区收起来 → 0.7s 后分框断言读到的已经是
+   「取消之后」的状态（`focus=other` / `adding=false` / 文本输入模式已退出）。
+   表现是稳定的两条红：
+   `❌ 点进「分」框之后原生退出了文本输入模式`、`❌ 点「分」框之后焦点没落在分框上（实际=other）`。
+   → 标志挪进 `step(0.7)` 块末尾（时间用例真的跑完才置位）。
+2. **「上面的待办不能消失」这条断言是空转的。** 临时数据目录里 `dayPanel.enabled` 默认
+   false、假 EventKit 也返回 0 条待办 → 「0 → 0 没变」恒真 = 没验。
+   → `EmptyEventKitStore` 增加 `seededTodos`；`buildDayPanelController` 在
+   `focusVerificationMode` + `DT_FOCUS_REPORT` 时**只在内存里**打开面板开关（不写盘）
+   并塞一条假待办「自检待办（不能消失）20:00」；断言增加两条：
+   ① 必须真的看到 ≥1 条待办（否则报「断言会空转」）；② 时间输入前后待办卡片的**文字内容**必须一致。
+
+#### 自检
+
+- `--verify-todo-focus`（真机，经 LaunchServices `open -n` 启动）连跑 **3 次：3/3 通过**；
+  报告里 `输入时间之前 → 点完「时」框 → 点完「分」框` 三处都是 `"todos": 1`，
+  焦点依次是 `add-hour` / `1`（标题框）/ `add-minute`，原生侧 `textInputActive=true`、
+  `firstResponderReady=true` 全程成立。
+- 回归有效性（上一段记录）：同一份代码在修 `timeChecksDone` 之前连跑 4 次**都是那两条红**。
+- `make test`：**2057 项断言全过**。
+- 相关自检全过：`--verify-day-panel`、`--verify-day-panel-click`、`--verify-typing`、`--verify-hover`。
+
+### 版本
+
+**1.4.6** —— 补丁版，**bundle id 不变**（仍为 `com.desktoptimetable.app.v120`）：
+日历 / 提醒事项的授权、登录项、通知身份全部延续，不用重新登记。
+构建已归档到 `版本迭代/DesktopTimetable-1.4.6.app`。
+
+## [1.4.5] - 2026-11-09
+
+### 添加待办：输入框能聚焦了，「取消」一次就生效
+
+用户原话（2026-11-09）：
+
+> 「现在输入日历点击了添加待办事项的时候输入框出现了但是这时候输入键盘无法聚焦，
+> 而且第一次点击取消了之后再次打开添加待办事项取消要点击两次，应该还是聚焦的问题，查清楚」
+
+#### 现象
+
+- 点「＋ 添加待办」→ 输入框出来了，**但键盘进不去**（打不了字，输入法也不弹）；
+- 取消一次之后**再打开**输入框，「取消」要点**两下**才收得回去；
+- 第一次（刚启动 app 之后）打开时反而是好的 —— 差别在「app 是不是已经 active」。
+
+#### 根因（两条，互相叠加）
+
+**根因一（原生）：退出输入模式时 `resignKey()` 把 app 留在「active 但没有 key window」的状态。**
+
+AppKit 的规矩：`.nonactivatingPanel` 窗口**只有跟着 app 的「激活过程」才能拿到 key**。
+
+- 第一次打开时 app 还是 inactive → `NSApp.activate` 触发激活过程 → `makeKey()` 成功
+  （实测 `attempt=0 appActive=false isKey=false` → `attempt=1 appActive=true isKey=true`）；
+- 退出输入模式时 `DesktopWindow.setTextInputMode(false)` 调 `resignKey()` →
+  app 变成「**active 但没有 key window**」（accessory app 退出输入模式不会 deactivate）；
+- 于是第二次打开时 `makeKey()` 被 AppKit **直接拒绝**，12 次重试全是
+  `appActive=true isKey=false` → WKWebView 拿不到 first responder → **键盘进不去**；
+- 而且那 4 秒的重试每次都 `NSApp.activate` + `activateAllWindows` + `makeKey`，
+  窗口被反复摆到前面 → **用户的点击被吃掉**（「取消要点两次」）。
+
+**根因二（网页）：「添加待办」那张卡每次重绘都重建，共享的 input 元素被搬走。**
+
+`dpTodoSection` 每次都 `h('div', { class: 'dpaddform' }, input)` 拼一个新表单 ——
+`h()` 会把 `input`（**跨重绘复用的那个元素**）从旧表单里**摘走**挂到新表单上：
+
+- 元素在 DOM 里被「摘下来再挂回去」→ **失焦** → `onblur` → `post('textInputBlur')`
+  → 原生退出文本输入模式 → **键盘断掉**；
+- 原生一退出输入模式就要重新抢 key（重试 4 秒）→ 又是「点击被吃掉」。
+
+两条合起来，正好对上用户报的两个现象。
+
+#### 修复
+
+**原生（`UI/DesktopWindow.swift`）**
+
+- `setTextInputMode(false)`：窗口**是 key 的时候不交出 key**，只把 first responder 收回来
+  （`if !isKeyWindow { resignKey() }`）。app 一直有 key window，下一次 `makeKey()` 照样认
+  —— 实测第二次打开 `attempt=0` 就 `isKey=true`（以前 12 次全失败）。
+- `takeKeyForTextInput` 的诊断日志改成**只在 `DT_DEBUG_INPUT=1` 时**写（以前每次都写统一日志）。
+
+**网页（`Resources/Timetable.js`）**
+
+- 新增 `ensureAddForm()`：「添加待办」的表单 DOM **建一次就留着**，重绘时只更新值，
+  **一个元素都不动**；
+- 新增 `updateAddCard()`：「添加待办」那张卡也是**稳定节点**，同时装**两种形态**
+  （收起态 `.dpadd` / 展开态 `.dpaddform`），来回切换只改 `display`；
+- `syncCards()`：`add` 这张卡现在可以正常复用了（以前被排除在外，就是因为它每次都重建）；
+- 新增 `window.ttAddFormVisible()`：**判「添加态开着没有」要看可见性**，
+  不能只看元素在不在（输入框现在是稳定元素，收起时只是被 `display:none` 藏起来）。
+
+**自检侧的连带修正**（判据从「元素在不在」改成「可见不可见」）
+
+- `--verify-day-panel`、`--verify-day-panel-click` 里几处
+  `!!document.querySelector('.dpaddform')` 改成 `window.ttAddFormVisible()`。
+
+#### 自检
+
+- **新增 `--verify-todo-focus`**（**真机**，经 LaunchServices `open -n` 启动）：
+  走**和用户完全一样**的链路（真实鼠标事件 → `CardInteractionView` → `forwardClick`
+  → 网页 DOM → `textInputFocus/Blur` → 原生拿 key + webView 拿 first responder），
+  验四件事：
+  1. 点「＋ 添加待办」之后输入框出现**且自己拿到焦点**；
+  2. 窗口是 key window、webView 是 first responder（键盘能进网页的**前提**）；
+  3. 点「取消」**一次**就收起；
+  4. **重新打开**再点「取消」，**仍然一次**收起，且第二次打开时窗口**又**拿到 key。
+  - 连跑 3 次：**3/3 通过**；
+  - **回归有效性**：把原生修复临时去掉 → 连跑 2 次**都是红的**
+    （`❌ 退出输入模式后 app 处于「active 但没有 key window」`、
+    `❌ 第二次打开时桌面窗口没拿到 key window`）；
+    把网页侧「每次重建表单」临时还原 → 也变红。
+- `make test`：**2057 项断言全过**。
+- 相关自检全过：`--verify-day-panel`、`--verify-day-panel-click`、`--verify-typing`、
+  `--verify-hover`、`--verify-card-scale`、`--verify-collapse`、`--verify-week-arrow`、
+  `--verify-pin-flow`。
+- 截图（`--shot-day-panel ... todoedit`）：添加态（标题框 + `20 : 00` + 取消）和
+  编辑态（标题 + `21 : 30` + 保存 / 取消 + 收起的「＋ 添加待办」）都正常。
+
+> `--verify-panel-animation` 在这台机器上一直是红的（归档的 1.4.4 也一样红）——
+> 无头环境下合成器不推进动画，属**既有环境限制**，与本轮无关。
+
+### 版本
+
+**1.4.5** —— 补丁版，**bundle id 不变**（仍为 `com.desktoptimetable.app.v120`）：
+日历 / 提醒事项的授权、登录项、通知身份全部延续，不用重新登记。
+构建已归档到 `版本迭代/DesktopTimetable-1.4.5.app`。
+
+## [1.4.4] - 2026-11-08
+
+### 折叠之后点日期，日历和待办直接弹出来（不再先把课表展开）
+
+用户原话：「继续实现我那个收缩课表之后，点击日历依然可以弹出来日历和待办事项的那个功能」。
+
+#### 现象
+
+- 折叠成一条之后点表头日期：课表先「唰」地展开，再开面板 —— 视线被甩一下；
+- 更早的实现里，折叠态点日期根本没反应（面板被 `.gridwrap` 裁掉了）。
+
+#### 根因
+
+- 网页 `onHeaderPick` 里写死了「折叠态 → 先 `post('toggleCollapse')` 展开，
+  展开完原生再开面板」；
+- 面板元素挂在 `.grid` 里，而折叠是靠 `.gridwrap { overflow: hidden }` +
+  让容器高度变成 38px 实现的 —— 面板如果留在里面，会被裁得只剩表头那一条；
+- 原生 `TimetableLayout.headerRect` 只有展开态的算法（表头底边 = 网格底边 + 数据区高），
+  折叠态算出来跑到卡片外面去了，悬停 / 点击的「面板那一列」也跟着错。
+
+#### 修复
+
+- `onHeaderPick`：删掉折叠态那条「先展开」的分支，点日期一律
+  `post('datePanelOpen')` + `openPanel(day)`。
+- 面板**换宿主**：折叠态挂到 `.card`（`panelHost()`），展开态还是 `.grid`；
+  `applyCollapse()` 在跨过一半时把元素搬一次家并重新定位。
+- `positionPanel()` 改成「宿主矩形 / 表头格矩形相减」算位置和宽度，
+  宿主是 grid 还是 card 都成立（pageZoom / transform 只差一个倍率）。
+- `.card.collapsed { overflow: visible }`：折叠时才允许面板伸出卡片；
+  `applyCollapse()` 同时给卡片加 `collapsed` 类。
+- 原生：`headerRect` 折叠态改成「贴着卡片底部」（`cardRect.minY + paddingBottom`），
+  `dayPanelRect` 折叠态按**满列高**往下伸；`animateCollapse` 不再顺手
+  `closeDayPanel()`（折叠时面板跟着落地，不再消失）。
+- `render()` 末尾补一次 `applyCollapse()`：新 DOM 默认是展开模板，
+  不补的话原生一推状态卡片会先弹开再收回去。
+
+#### 自检
+
+- 新增自检入口 `--verify-collapse-panel`（原来只有代码没有进套件）：
+  - 折叠态点第 3 列：`折叠进度=1.0`（**保持折叠**）、`open=true day=3`；
+  - 面板矩形 `{{422,169.5},{118.6,600}}`，顶边 = 表头底边 `769.5`（±2）；
+  - 网页面板：`opacity=1`（关掉过渡量终态）、`visibility=visible`、
+    父节点是 `ttcard`、卡片 `overflow=visible` 且带 `collapsed` 类；
+  - 换到第 5 列：面板横向跟着走；展开后仍开着。
+- `--verify-collapse` 第 6 步改成新语义：折叠态点表头**不再展开**。
+- `make test` **2052 项断言全过**；13 个 `--verify-*` 全过。
+- 截图（折叠 + 第 3 列面板开着）：课表保持一条，日历/待办面板从周三那列下面垂出来。
+
 ## [1.4.3] - 2026-11-08
 
 ### 日期覆盖层 / 弹窗锚点 / 启动缩放与位置：AppDelegate 重建后的接线补齐
@@ -268,6 +692,291 @@
 - 100%：图钉 14.8×17（原来 17×17）；112%：16.55×19.03（高 = 17×1.12 ✓）。
 - `make test`：**2052 项断言全过**；12 个 `--verify-*` 全过。
 - 出图（网页层 1.0）：图钉细长形，和的旧版观感一致。
+
+### 折叠态面板显示不全 / 鼠标移上去就消失
+
+用户原话：「折叠状态点击了表头之后，日历显示不全，而且移动到日历的那一部分之后，
+日历就直接消失了……桌面上没有显示日历的地方不是算在课表内」。
+
+#### 根因
+
+- **显示不全**：网页 `body` 的高度 = 卡片高度 + 上下 90px 留白。折叠后卡片只有 173，
+  `body` 就只剩 353px 高，而 `body { overflow: hidden }` —— 面板从 306 往下伸到 900+
+  的部分**全被裁掉**，只剩最上面一两个卡片可见。
+- **移上去就消失**：原生 `syncLiveHover()` 只把 `TimetableLayout.cardRect` 当「在课表上」。
+  面板伸出卡片之后，指针一进面板就在 cardRect 之外 → 它给网页发 `clearLiveHover()`，
+  网页当成「指针离开课表」→ 把面板淡出。
+
+#### 修复
+
+- `Timetable.html`：给 `body` 加 `min-height: 100vh`（视口下限）。卡片位置不变，
+  只是让「伸到卡片下面」的面板有地方画；超出视口的部分照旧看不到。
+- `AppDelegate.syncLiveHover()`：判定改成 `cardRect ∪ dayPanelRect`，
+  和 `updateHover()` 同一口径（面板那一列算课表内，桌面空白处不算）。
+- 自检新增两条断言（`--verify-collapse-panel`）：
+  「指针停在面板上时网页里的面板不能被收掉（open / show 都还在）」，
+  以及 hover 恢复时按**当前**面板矩形取中心（面板会跟着真实指针换列）。
+
+### 鼠标进到日历那一列，整个课表还是会淡出（原生几何和网页的真实位置对不上）
+
+用户原话：「鼠标移动到显示日历的那一列之后，整个课表又会消失……只移动到那一列的时候，
+要被判定在课表区域内」。
+
+#### 根因
+
+- 悬停 / 点击穿透问的是**原生**的 `TimetableLayout.dayPanelRect(day:)` —— 那套几何
+  是按「展开时的网格」算的（`gridOrigin` + 列宽），折叠 / 缩放 / 面板换了宿主之后
+  和网页里真实画出来的位置差一截（实测 x 差 74pt = body translate 的量）。
+- 差出去的那条缝里，`updateHover` 判成「指针不在课表上」→ 整张卡片淡到 22%。
+
+#### 修复
+
+- **网页把面板的真实矩形报给原生**：`positionPanel()` 末尾
+  `post('panelRect', {l,t,w,h,day,open:true})`（`getBoundingClientRect()` 原值，
+  transform 档已是视觉 px、pageZoom 档由原生再乘倍率）；关闭时补一条 `open:false`。
+- 原生新增 `webPanelRect` / `handleWebPanelRect`：换算成窗口坐标
+  （x×倍率、y = 窗口高 − (top+height)×倍率），`dayPanelRectInWindow` **优先用它**，
+  没报过才退回 `TimetableLayout` 的老几何。
+- `panelRect` 属于「几何回报」而不是用户意图 —— `post()` 里不再让它覆盖
+  `__ttLastPost`（否则自检里「最后发的意图」全被它顶掉，`--verify-day-panel` 直接红）。
+
+#### 自检
+
+- 新增/沿用 `--verify-collapse-panel` 的断言：指针在面板上 → `hovering=true`、
+  面板 `open/show` 都还在；指针在面板右侧的桌面空白处 → `hovering=false`。
+- 诊断实测（探针坐标）：卡片上 `hovering=true`、面板中心 `hovering=true`、
+  面板右侧 60pt 处 `hovering=false`。
+- `--verify-collapse-panel`：通过（面板 `opacity=1`、`body` 高 1076、面板四个卡片
+  （待办 / 添加待办 / 日历行程 / 今日详情）全部可见）。
+- 出图对比：折叠态面板现在和展开态内容一致，从周三那列下面垂出来。
+- `make test` **2052 项断言全过**；13 个 `--verify-*` 全过。
+
+### 设置里点「接入日历与提醒事项」，系统授权框不弹 / 状态一直「正在读取」
+
+用户原话：「日历与待办事项的权利正在读取。然后我现在的提醒事项输入不了，是因为
+没有授权吗？……点击了接入待办事项之类的权利之后，在设置里面并没有弹出来窗口」。
+
+#### 根因
+
+- `DayPanelController` 是在 `buildDesktopWindow()` 里建的，那句
+  `settingsController?.dayPanelController = controller` 执行时**设置面板还没建**
+  （`buildSettingsController()` 后跑）—— 等于空操作。
+- 于是设置里那个「日历与提醒事项接入」开关：配置改了、界面刷新了，但
+  `dayPanelController?.requestAccess()` 是 **nil 调用** —— 系统授权框永远不出来；
+  状态行也没有控制器可问，只能一直显示「正在读取」。没授权 → 提醒事项写不进去。
+
+#### 修复
+
+- `buildSettingsController()` 里补一次注入：
+  `settingsController.dayPanelController = dayPanel` + `refreshDayPanelRows()`
+  （控制器的 `didSet` 会顺手绑好「已完成提醒事项」服务）。
+- 自检加断言（`--verify-slider-scale` 打开设置面板时）：
+  `delegate.testSettingsHasDayPanel` 必须为 true —— 防止再断。
+
+#### 自检
+
+- `--verify-slider-scale`：通过（含新断言）。
+- `make test` **2052 项断言全过**；13 个 `--verify-*` 全过。
+
+### 「＋添加待办」能点开输入框，但一个字都打不进去
+
+用户原话：「现在添加待办事项还是无法输入」。
+
+#### 根因
+
+- 桌面层窗口是 `.nonactivatingPanel`，**永远拿不到 key window** → WKWebView 收不到键盘。
+  项目里本来就有一条解法：网页输入框聚焦时发 `textInputFocus` → 原生把窗口
+  **临时**切成「能成为 key + first responder 交给 webView」（`DesktopWindow.setTextInputMode`），
+  失焦 / 回车 / Esc 再还原。
+- 重建 AppDelegate 时**这条线整段丢了**：`handleWebIntent` 里没有
+  `textInputFocus` / `textInputBlur` 分支，`renderer.onTextInputModeChanged`
+  也从来没赋值、`window.textInputTarget` 也没设 —— 输入框能点开、光标在闪，
+  但按键全落到别的 App 上。
+
+#### 修复
+
+- `handleWebIntent`：`textInputFocus` → `webRenderer?.setTextInputMode(true)`，
+  `textInputBlur` → `false`。
+- 建窗口时接上：`window.textInputTarget = renderer.webView`；
+  `renderer.onTextInputModeChanged = { (window as? DesktopWindow)?.setTextInputMode($0) }`。
+- 自检加断言（`--verify-day-panel-click`）：真实点「＋ 添加待办」之后
+  `testTextInputActive == true` —— 只验「输入框出现了」不够，必须验「进了文本输入模式」。
+
+#### 自检
+
+- `--verify-day-panel-click`：通过（日志 `添加待办后的文本输入模式=true`）。
+- `make test` **2052 项断言全过**；13 个 `--verify-*` 全过。
+
+### 取消添加待办要按两下 Esc（按一下就该取消）
+
+用户原话：「现在要按两下取消添加才能取消……我要的是按一下就取消，按两下是个 bug」。
+
+#### 根因
+
+- 输入框的 Esc 只挂在 `<input>` 自己的 `onkeydown` 上。可进入文本输入模式后
+  （窗口变 key、键盘交给 WKWebView），**第一下 Esc 有可能根本到不了 DOM**：
+  AppKit 会先走取消链路（`NSWindow.cancelOperation`），DOM 收不到 `keydown`；
+  用中文输入法时第一下 Esc 还会被输入法拿去「取消组词」。
+- 也就是说：第一下被 AppKit / 输入法接走，第二下才轮到网页 —— 于是「要按两下」。
+
+#### 修复
+
+- 网页新增 **Esc 的统一出口** `window.ttCancelEditing()`（清添加态 / 取消编辑），
+  并挂一个**文档级** `keydown` 兜底（焦点不在输入框时也能取消）；
+  输入法组词中（`e.isComposing` / keyCode 229）时**不拦**，让输入法先取消组词。
+- 原生 `DesktopWindow.cancelOperation(_:)`：文本输入模式下直接把 Esc 转给
+  `ttCancelEditing()` —— 把「被 AppKit 吃掉的 Esc」这条路径也补上。
+- 自检（`--verify-day-panel-click` 末尾）：打开「＋添加待办」→ 调一次
+  `ttCancelEditing()` → 断言输入框收起、`handled == true`、退出文本输入模式。
+
+#### 再修（同一天晚上）：第二次打开输入框时，第一下 Esc 还是被吃掉
+
+用户原话：「点一下可以取消，但再次点击新建提醒事项就需要点击两次」。
+
+- 根因：窗口每次重新变成 key 时，**第一下按键会被 AppKit / WebKit 建立输入上下文吃掉**
+  （到不了 DOM 的 `keydown`）—— 第二次打开输入框正好踩这个点。
+- 修复：文本输入期间在**原生**装一个 `addLocalMonitorForEvents(.keyDown)`（responder
+  派发之前就能看到事件）：Esc 直接调网页的 `ttCancelEditing()` 并吞掉；
+  退出输入模式时卸掉监视器。
+- 自检：`--verify-day-panel-click` 断言「输入时监视器=true、取消后=false」。
+
+#### 再修（第二次）：一次性 eval 也被吞，改走状态推送
+
+用户：「现在还是不行」。排查发现原生监视器里**同步/异步的一次性 `evaluateJavaScript`
+在事件派发栈里都会被 WebKit 吞掉**（和之前「点箭头不刷新」同一个坑），
+所以监视器虽然拦到了 Esc，网页却没收到取消指令。
+
+- 现在 Esc 不再发一次性脚本：给状态快照加一个 `cancelCompose` 令牌
+  （每次 Esc +1），`refreshCard()` 推给网页，网页在 `ttUpdate` 里看到号码变了
+  就调 `ttCancelEditing()`。这条通道是每轮都在跑、验证过的。
+- `DesktopWindow.cancelOperation` 改成发 `.ttCancelEditingRequested` 通知，
+  和监视器共用同一条链路。
+- 自检改成**走产品路径**：`delegate.testRequestCancelEditing()`（发那条通知）
+  → 断言输入框收起、退出文本输入模式、卸掉 Esc 监视器。
+
+#### 自检
+
+- 日志：`Esc 取消：取消前有输入框=1 处理=nil 取消后=0`，`文本输入模式=false`。
+- `make test` **2052 项断言全过**；13 个 `--verify-*` 全过。
+- 顺带修：图钉自检改成**重试派发**（`evaluateJavaScript` 偶发被 WebKit 丢掉，
+  不是产品问题），pin-flow 连跑 3 次稳定通过。
+
+### 待办右键菜单没反应（修改… / 删除 / 取消）
+
+用户原话：「右键删除恢复取消是不是还没有恢复」。
+
+#### 根因
+
+- 网页右键会 `post('todoMenu', …)`；可原生 `handleWebIntent` 里
+  `action.hasPrefix("todo")` 这条**把 `todoMenu` 也当成日期覆盖层的意图**，
+  直接交给 `DayPanelController.handle(...)` —— 控制器不认这个动作，
+  `default: break`，于是菜单永远不弹（修改… / 删除 / 取消全都点不到）。
+- 顺带查出：交互层（盖在 WKWebView 上做拖动 / 图钉）**只转发了左键**，
+  右键被它吃掉，网页连 `contextmenu` 都收不到 —— 以前是靠原生自己算命中弹菜单，
+  改成「菜单在网页里判断」之后这条线就断了。
+
+#### 修复
+
+- `handleWebIntent`：`todoMenu` 先截走交给 `handleTodoMenuIntent`（弹 NSMenu），
+  不再落进 `todo*` → DayPanelController 的分支。
+- `CardInteractionView`：补 `rightMouseDown` → `onRightClick`（**推到下一个 runloop**，
+  避免「事件派发栈里发起 eval 被吞」）；`WebCardRenderer.forwardContextMenu(at:)`
+  合成 `contextmenu` 事件派发给命中元素（和左键 `forwardClick` 同一套）。
+- 自检（`--verify-day-panel-click`）：**真实右键**待办卡片 → 断言弹出
+  「修改… / 删除 / 取消」三项。
+
+#### 自检
+
+- 日志：`右键结果：menu=["修改…", "删除", "取消"] 网页最后意图=datePanelOpen`。
+- `make test` **2052 项断言全过**；15 个 `--verify-*` 全过
+  （含 `--verify-completed-reminders`（恢复 / 删除 / 批量）、`--verify-typing`（真按键输入））。
+
+### 时间框点了打不进字；键盘 ←/→ 不能切换「时 / 分」
+
+用户原话：「时间输入不进去点击之后输入结果什么都没有，并加上点击左右移动键能切换
+到小时和分钟」（左右移动键 = 键盘方向键，不要图形按钮）。
+
+#### 根因
+
+- 时间框是真的 `<input>`，但卡片上的点击是原生**合成**转发的
+  （`dispatchEvent(new MouseEvent('click'))`）—— 合成点击**不会自动给输入框焦点**，
+  所以点上去没有光标、打字全丢。
+- 键盘只处理了 ↑↓（加减）和 Tab（跳格），没有 ←/→。
+
+#### 修复
+
+- `ensureTimePart` 的 `<input>` 加 `onclick`：显式 `focus()` + `select()`（打字直接
+  覆盖两位数字），并 `post('textInputFocus')` 进入文本输入模式。
+- `onkeydown` 加 ←（`ArrowLeft` → 时）/ →（`ArrowRight` → 分）；
+  `focusTimePart` 聚焦时也顺手 `select()`。
+
+#### 自检
+
+- `--verify-typing`（**真按键**）新增一段：点击时框 → 断言聚焦 → 打 `0`/`8` → 自动跳到
+  分框 → 打 `3`/`0` → 断言 `08` / `30`；再断言 → 焦点到分框、← 回到时框：
+  ```
+  [诊断] 点击「时」框：{"found":true,"focused":true}
+  [诊断] 输入 08:30 后：{"hour":"08","minute":"30","active":"add-hour"}
+  [诊断] 时框按 → 后焦点：add-minute
+  [诊断] 分框按 ← 后焦点：add-hour
+  ```
+
+### 课表上的时间一直对不上（只有点一下 / 切周才更新）
+
+用户原话：「课表显示时间和现在的时间一直对不上，只有再次点击或者切换周之后时间才会更新」。
+
+#### 根因
+
+- 网页启动时脚本尾部会调一次 `render()`，再 `setInterval(updateLiveTexts, 10000)`
+  装时钟。可那一次 `render()` 里**第一行就解引用 `S.viewWeek`**，而这时状态还没到
+  （`S` 是 undefined）→ 抛 `TypeError` → **后面装定时器那段被一起中断**。
+- 于是时钟只在「原生推状态」时顺带更新（点一下 / 切周），10 秒定时器从来没装上。
+
+#### 修复
+
+- `render()` 开头先判空再解引用（`if (!S) return;` 提到前面）。
+- 脚本尾部包 try/catch：启动阶段真抛了也**不连累定时器**，并把错误记到
+  `window.__ttBootError` 方便排查。
+
+#### 自检
+
+- `--verify-web-render`（之前一直是红的）：`时钟就地刷新：01:24（期望 01:24）`、
+  `window.__ttClockTimer` 已装上 → **通过**。
+
+### 时间填错之后的红字提示，取消添加也一直挂着
+
+用户原话：「我输入错误之后就一直出现这个，取消了添加待办还在」（附图：红框
+「时间请用 00:00–23:59」）。
+
+#### 根因
+
+- `closeTodoCompose()`（Esc / 取消 / 提交成功共用）只清了标题和时间的值，
+  **没清 `DP.addError`** —— 于是「时间填错 → 取消」之后红色提示还在；
+  而且提示只在「下一次成功提交」时才被清掉。
+- 排版：`.dpadderr` 写了 `line-break: anywhere`，在 118pt 宽的列里把
+  「00:00–23:59」断成「00:00–2 / 3:59」。
+
+#### 修复
+
+- `closeTodoCompose()` 里清 `DP.addError`（打开输入框时本来就会清）。
+- 新增 `clearAddError()`：用户一开始打标题 / 改时间就把提示摘掉（只摘 DOM
+  节点、不整块重绘，保住焦点和输入法）。
+- `.dpadderr` 改 `word-break: keep-all; line-break: normal`，只会在空格处换行。
+
+#### 自检
+
+- `--verify-day-panel-click` 新增：填非法时间 → 断言出现提示（`err=1`）→
+  取消 → 断言提示消失（`err=0`）、输入框收起：
+  ```
+  [诊断] 填入非法时间 99：["ok": 1, "err": 1, "text": 时间请用 00:00–23:59]
+  [诊断] 取消添加后：["adding": 0, "err": 0]
+  ```
+- `make test` **2052 项断言全过**；16 个 `--verify-*` 全过。
+
+#### 版本
+
+- **1.4.4（补丁版）** —— 折叠态点日期直接弹面板（交互行为修正）；
+  按用户要求只更新版本、**不推送 git**；bundle id 仍为 `com.desktoptimetable.app.v120`。
 
 #### 清理
 

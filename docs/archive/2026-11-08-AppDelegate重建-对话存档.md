@@ -74,6 +74,20 @@
 
 - `make test`：2051 项断言全过。
 - 12 个 `--verify-*` 全过（见 CHANGELOG `[1.4.3]` 的具体数字）。
+- 补记八（1.4.4）：折叠态点日期直接弹面板（不再先展开）—— 面板换宿主到 `.card`、
+  原生 `headerRect` / `dayPanelRect` 折叠态改成贴卡片底部 / 满列高；
+  `--verify-collapse-panel` 进套件（13 个自检全绿、make test 2052 全过）。
+  版本按用户要求定为 **1.4.4**，**不推送 git**（下次大版本跃迁再一起推）。
+  追加修复（同一版 1.4.4）：① 折叠态面板「显示不全」—— `body` 高度只有卡片 + 180、
+     `overflow:hidden` 把伸出去的面板裁了 → `body { min-height: 100vh }`；
+     ② 「鼠标移到面板上就消失」—— 原生 `syncLiveHover()` 只认 cardRect，
+     改成 `cardRect ∪ dayPanelRect`（和 `updateHover` 同口径）。
+  再补（1.4.4）：设置面板没拿到 `dayPanelController`（建窗口时设置面板还没建）→
+    「接入」开关点了不弹授权框、状态行卡在「正在读取」；`textInputFocus/Blur`
+    链路整段丢失 → 「添加待办」打不了字。两处都已接上并加了自检断言。
+  再加一道：**面板矩形改由网页上报**（`panelRect` 消息 → `webPanelRect`）——
+  原生那套几何是展开态算的，折叠 + 缩放后差 74pt（= body translate），
+  差出来的缝里悬停判成「离开课表」，整张卡片淡出。
 - 补记七：Git 推送链路搭好 —— 项目里建了 `推送仓库/`（rsync 导出的源码副本，
   141 个文件 / 4.3MB），`git init -b code` + `remote origin` 指向
   `https://github.com/mzx899/dsh-desktoptimetable.git`，并把 push refspec 锁成

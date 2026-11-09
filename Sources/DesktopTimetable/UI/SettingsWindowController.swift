@@ -1668,14 +1668,21 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
         infoLabel.maximumNumberOfLines = 2
         infoLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        let importBtn = NSButton(title: "导入课表…", target: self, action: #selector(importSchedule))
-        importBtn.bezelStyle = .rounded
-        importBtn.controlSize = .small
-        importBtn.font = .systemFont(ofSize: 12)
-        let revealBtn = NSButton(title: "在访达中显示", target: self, action: #selector(revealData))
-        revealBtn.bezelStyle = .rounded
-        revealBtn.controlSize = .small
-        revealBtn.font = .systemFont(ofSize: 12)
+        // 两个按钮都**带符号**、**同宽**，并且「导入课表」不再带省略号
+        // （2026-11-09 用户要求：菜单项前面加符号、去掉省略号、两个框一样长）。
+        //
+        // 用 `makeIconButton`（课表卡片那一排「新建 / 重命名 / …」同款），
+        // 图标 + 文字左对齐；宽度钉成同一个常量，否则 NSButton 各自按文字宽度收缩，
+        // 两个圆角框一个长一个短。
+        let importBtn = makeIconButton("导入课表", symbol: "square.and.arrow.down",
+                                       action: #selector(importSchedule))
+        let revealBtn = makeIconButton("在访达中显示", symbol: "folder",
+                                       action: #selector(revealData))
+        // 126pt 是按「在访达中显示」（6 个汉字 + 图标 + 内边距）量出来的宽度。
+        let dataButtonWidth: CGFloat = 126
+        for b in [importBtn, revealBtn] {
+            b.widthAnchor.constraint(equalToConstant: dataButtonWidth).isActive = true
+        }
 
         let btnRow = NSStackView(views: [importBtn, revealBtn])
         btnRow.orientation = .horizontal
@@ -3363,6 +3370,46 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
         let y = max(0, frame.minY - 8)
         scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
         scroll.reflectScrolledClipView(scroll.contentView)
+    }
+
+    /// 自检：「课表数据」卡片那两个按钮长什么样。
+    ///
+    /// 2026-11-09 用户要求：两个按钮前面各加一个符号、「导入课表」去掉省略号、
+    /// 两个圆角框**一样长**。这里只读界面状态，不触发任何动作。
+    struct DataCardButtonProbe {
+        var importTitle = ""
+        var revealTitle = ""
+        var importHasIcon = false
+        var revealHasIcon = false
+        var importWidth: CGFloat = 0
+        var revealWidth: CGFloat = 0
+        var importEnabled = false
+    }
+
+    func probeDataCardButtons() -> DataCardButtonProbe {
+        var probe = DataCardButtonProbe()
+        var buttons: [NSButton] = []
+        func walk(_ v: NSView) {
+            if let b = v as? NSButton { buttons.append(b) }
+            for sub in v.subviews { walk(sub) }
+        }
+        if let content = window?.contentView { walk(content) }
+        for b in buttons {
+            switch b.title {
+            case "导入课表":
+                probe.importTitle = b.title
+                probe.importHasIcon = b.image != nil
+                probe.importWidth = b.frame.width
+                probe.importEnabled = b.isEnabled
+            case "在访达中显示":
+                probe.revealTitle = b.title
+                probe.revealHasIcon = b.image != nil
+                probe.revealWidth = b.frame.width
+            default:
+                break
+            }
+        }
+        return probe
     }
 
     func probeReminderCard() -> ReminderCardProbe {

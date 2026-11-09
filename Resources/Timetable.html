@@ -27,6 +27,11 @@
     width: 1148px;
     padding: 90px;
     box-sizing: border-box;
+    /* ⚠️ 折叠态的面板要伸到卡片**下面**（点日期照样弹日历），而 body 的
+       高度原本 = 卡片高度 + 180 内边距（折叠时只有 353px），
+       `overflow: hidden` 会把面板下半截直接裁掉（用户：「日历显示不全」）。
+       给一个视口下限：面板最多伸到视口底部，超出的部分本来也不该看到。 */
+    min-height: 100vh;
     /* 缩小档位由原生给 body 设 transform（见 WebCardRenderer.applyScale）。 */
   }
 </style>
