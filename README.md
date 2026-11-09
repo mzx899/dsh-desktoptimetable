@@ -167,7 +167,7 @@ macOS 26（Tahoe）给第三方菜单栏图标加了一道系统级开关：
   都以**课表当前中心**为锚点出现；课表拖到哪儿，弹窗就跟到哪儿。
   弹窗超出屏幕可见区时会被夹回屏幕内。
 - 弹窗外观：**深色玻璃底（上浅下深的竖向渐变）+ 一圈边缘假光**（上亮下暗），
-  不再是一块实心黑；圆角 / 红绿灯都在材质上，四个角一致（1.4.7 调）。
+  不再是一块实心黑；圆角 / 红绿灯都在材质上，四个角一致（1.4.7 调，1.4.8 沿用）。
 - 多显示器时以**课表所在的那块屏**为准。
 
 ### 多课表 · Multiple timetables
@@ -895,7 +895,8 @@ Sources/DesktopTimetable/
 | `DesktopTimetable-1.3.3.app` | 1.3.3 | `com.desktoptimetable.app.v120` | 第三代上一版（放到最大不再被画布裁；卡片始终在画布正中），归档在 `版本迭代/` |
 | `DesktopTimetable-1.4.0.app` | 1.4.0 | `com.desktoptimetable.app.v120` | 第三代上一版（课表折叠 / 展开），归档在 `版本迭代/` |
 | `DesktopTimetable-1.4.1.app` | 1.4.1 | `com.desktoptimetable.app.v120` | 第三代上一版（折叠态缩放按顶边 / 展开不再被裁），归档在 `版本迭代/` |
-| `DesktopTimetable-1.4.7.app` | 1.4.7 | `com.desktoptimetable.app.v120` | 第三代，**最新源码版**（弹窗换外观：深色玻璃底 + 边缘假光），归档在 `版本迭代/` |
+| `DesktopTimetable-1.4.8.app` | 1.4.8 | `com.desktoptimetable.app.v120` | 第三代，**最新源码版**（弹窗文案精简 / 选项卡铺满 / 课表数据按钮 / 合并差异页修复与玻璃化），归档在 `版本迭代/` |
+| `DesktopTimetable-1.4.7.app` | 1.4.7 | `com.desktoptimetable.app.v120` | 第三代上一版（弹窗换外观：深色玻璃底 + 边缘假光），归档在 `版本迭代/` |
 | `DesktopTimetable-1.4.6.app` | 1.4.6 | `com.desktoptimetable.app.v120` | 第三代上一版（修「时间输入断键盘 / 输入时间时待办消失」），归档在 `版本迭代/` |
 | `DesktopTimetable-1.4.5.app` | 1.4.5 | `com.desktoptimetable.app.v120` | 第三代上一版（修「添加待办键盘进不去 / 取消要点两下」），归档在 `版本迭代/` |
 | `DesktopTimetable-1.4.4.app` | 1.4.4 | `com.desktoptimetable.app.v120` | 第三代上一版（折叠态点日期直接弹日历 / 待办面板，不再先展开），归档在 `版本迭代/` |
@@ -972,6 +973,11 @@ WebKit 在 `pageZoom < 1` 时会按 9pt 最小逻辑字号把小字撑大，
 1.4.4 是 1.4.3 的**补丁版**：折叠之后点表头日期**保持折叠**、直接弹出日历 / 待办面板
 （面板挂在卡片上，从折叠条底下垂出来）；以前是「先展开课表再开面板」。
 回归入口：`--verify-collapse-panel`。
+
+1.4.8 是 1.4.7 的**补丁版**（6 件事，都是文案 / 版式 / 外观修复）：
+导入决策弹窗去掉重复清单、删除整门课程的红色按钮改叫「删除」、导入选项卡铺满居中、
+设置「课表数据」两个按钮加符号并等宽、「合并课表差异」列表整页空白修复
+（`documentView` 尺寸 0×0）、该窗口换成玻璃底 + 卡片。
 
 1.4.7 是 1.4.6 的**补丁版**：弹窗换外观 —— 深色玻璃底改成**上浅下深的竖向渐变**
 （`α 0.86`，不再是一块实心黑），四周加一圈**上亮下暗的边缘假光**（1.2pt 描边 +
@@ -1054,7 +1060,8 @@ DesktopTimetable/
 │   ├── DesktopTimetable-1.4.1.app  ← 上一版（折叠态缩放按顶边 / 展开不再被裁）
 │   ├── DesktopTimetable-1.4.5.app  ← 上一版（修「添加待办键盘进不去 / 取消要点两下」）
 │   ├── DesktopTimetable-1.4.6.app  ← 上一版（修「时间输入断键盘 / 待办消失」）
-│   └── DesktopTimetable-1.4.7.app  ← 最新构建（弹窗玻璃底 + 边缘假光）
+│   ├── DesktopTimetable-1.4.7.app  ← 上一版（弹窗玻璃底 + 边缘假光）
+│   └── DesktopTimetable-1.4.8.app  ← 最新构建（文案 / 选项卡 / 差异页）
 ├── Sources/               ← 唯一源码，A/B 两种模式都在这里
 ├── Resources/
 ├── Tests/
@@ -1079,7 +1086,7 @@ DesktopTimetable/
 └── README.md
 ```
 
-改完代码 `make install` 只更新**当前版**那个 App（`DesktopTimetable-1.4.7.app`，其中 `VERSION` 在 `Makefile` 里统一控制），
+改完代码 `make install` 只更新**当前版**那个 App（`DesktopTimetable-1.4.8.app`，其中 `VERSION` 在 `Makefile` 里统一控制），
 旁边的 1.0.0 / 1.0.1 / 1.1.2 保持原样不动；
 A 模式用 `make run-a` 或 `DT_SNAPSHOT=1` 启动，不再保留第三份 `.app`。
 
