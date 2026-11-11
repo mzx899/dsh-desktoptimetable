@@ -328,6 +328,49 @@ suite("TimetableState · 显示逻辑") {
     expectEqual(TimetableState.gapText(85), "1 小时 25 分", "间隔文案-时分")
 }
 
+suite("TimetableState · 下课边界（右开区间）") {
+    // 用户反馈（2026-11-11）：「课程已经结束了但是上面还是显示上课」。
+    // 根因：判定「正在上课」用的是**闭区间** `[开始, 结束]` ——
+    // 到了**下课那一刻**（17:40）整整一分钟都还显示「正在上课 · 剩 0 分钟」。
+    // 下课到下一节课之间没有「下一节」，那一分钟状态条特别显眼。
+    //
+    // 现在改成**右开区间** `[开始, 结束)`：09:35 起就是「今日课程已结束」。
+    let start = day(2026, 8, 31)
+    let courses = [
+        Course(day: 4, block: 0, name: "数据结构", weeks: Array(1...14)),
+    ]
+    // 默认作息：block 0 = 第 1、2 节 = 08:00–09:35。
+    expectEqual(TimetableState.blockStart(0), "08:00", "block 0 开始时间")
+    expectEqual(TimetableState.blockEnd(0), "09:35", "block 0 结束时间")
+
+    func stateAt(_ comps: DateComponents) -> TimetableState {
+        let d = WeekMath.calendar.date(from: comps)!
+        return TimetableState(courses: courses, semesterStart: start,
+                              currentWeek: 8, viewWeek: 8, now: d)
+    }
+
+    // 2026-10-22 是周四（block 0 = 08:00–09:35）。
+    let during = stateAt(DateComponents(year: 2026, month: 10, day: 22, hour: 8, minute: 10))
+    expect(during.currentBlock != nil, "上课时间内有正在上的课")
+    expect(during.status.isLive, "上课时间内状态条是「正在上课」")
+
+    // 下课那一刻（09:35）—— 课已经结束，不该再说「正在上课」。
+    let exactEnd = stateAt(DateComponents(year: 2026, month: 10, day: 22, hour: 9, minute: 35))
+    expectEqual(exactEnd.currentBlock, nil, "下课那一刻不再算「正在上的课」")
+    expect(!exactEnd.status.isLive, "下课那一刻状态条不是「正在上课」")
+    expect(exactEnd.status.text.contains("已结束") || exactEnd.status.text.contains("没有课"),
+           "下课那一刻状态条文案应是「已结束 / 没有课」，实际：\(exactEnd.status.text)")
+
+    // 结束前一分钟仍然在上课。
+    let oneMinBefore = stateAt(DateComponents(year: 2026, month: 10, day: 22, hour: 9, minute: 34))
+    expect(oneMinBefore.status.isLive, "结束前一分钟仍然是「正在上课」")
+    expect(oneMinBefore.status.meta.contains("1 分钟"), "结束前一分钟剩 1 分钟")
+
+    // 上课那一刻算「正在上课」。
+    let exactStart = stateAt(DateComponents(year: 2026, month: 10, day: 22, hour: 8, minute: 0))
+    expect(exactStart.status.isLive, "上课那一刻就是「正在上课」")
+}
+
 
 // MARK: - 卡片点击命中
 
@@ -6831,8 +6874,10 @@ suite("日期覆盖层 · 跨天刷新天气（今天 / 天气都要换）") {
         "2026-11-03": DayPanelWeather(text: "多云", temperature: 10, min: 8, max: 18),
         "2026-11-04": DayPanelWeather(text: "多云", min: 8, max: 18),
     ]
+    // ⚠️ 2026-11-11 起：天气只走「手填地区」，没地区就**不请求定位** ——
+    // 这些用例原来靠「空地区 → 走定位」拿天气，现在必须显式选一个地区。
     let controller = DayPanelController(
-        settings: DayPanelSettings(enabled: true, weatherEnabled: true),
+        settings: DayPanelSettings(enabled: true, weatherEnabled: true, weatherCity: "秦皇岛"),
         festivalProvider: EmptyFestivalProvider(),
         todayIndex: 1,
         baseMonday: day(2026, 11, 2),
@@ -6882,7 +6927,7 @@ suite("日期覆盖层 · 跨天刷新天气（今天 / 天气都要换）") {
         "2026-11-06": DayPanelWeather(text: "晴", temperature: 4, min: -6, max: 4),
     ]
     let raceController = DayPanelController(
-        settings: DayPanelSettings(enabled: true, weatherEnabled: true),
+        settings: DayPanelSettings(enabled: true, weatherEnabled: true, weatherCity: "秦皇岛"),
         festivalProvider: EmptyFestivalProvider(),
         todayIndex: 1,
         baseMonday: day(2026, 11, 2),
@@ -6904,11 +6949,13 @@ suite("日期覆盖层 · 跨天刷新天气（今天 / 天气都要换）") {
            "扫多列不能发多次请求（实际 \(raceWeather.forecastRequestCount) 次）")
 
     // 设置里关掉「显示天气」→ 面板里立刻没有天气，且不再请求。
-    controller.updateSettings(DayPanelSettings(enabled: true, weatherEnabled: false))
+    controller.updateSettings(DayPanelSettings(enabled: true, weatherEnabled: false,
+                                               weatherCity: "秦皇岛"))
     expectEqual(controller.testContent.weatherEnabled, false, "关掉开关要立刻同步到内容")
     expect(controller.testContent.festival.weather == nil, "关掉开关要清掉已显示的天气")
     let afterOff = fake.forecastRequestCount
-    controller.updateSettings(DayPanelSettings(enabled: true, weatherEnabled: true))
+    controller.updateSettings(DayPanelSettings(enabled: true, weatherEnabled: true,
+                                               weatherCity: "秦皇岛"))
     for _ in 0..<10 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
     expectEqual(controller.testContent.weatherEnabled, true, "重新打开开关要同步到内容")
     expect(fake.forecastRequestCount > afterOff,
@@ -7182,6 +7229,54 @@ suite("天气地名搜索 · 优先中国 / 换地区清旧数据") {
     expect(fake.forecastRequestCount > before,
            "换地区要重新取天气（\(before) → \(fake.forecastRequestCount)）")
     expectEqual(ctl.testContent.festival.weather?.text, "晴", "重新取回来还是天气")
+}
+
+// MARK: - 天气：不再请求系统定位（2026-11-11 用户要求）
+
+suite("天气 · 不再请求定位授权（只用手填地区）") {
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
+    let monday = cal.date(from: DateComponents(year: 2026, month: 11, day: 2))!
+    let fake = FakeWeatherProvider(stub: DayPanelWeather(text: "晴", temperature: 2,
+                                                         min: -2, max: 10))
+    var settings = DayPanelSettings(enabled: true, weatherEnabled: true, weatherCity: "")
+    let ctl = DayPanelController(settings: settings,
+                                 festivalProvider: EmptyFestivalProvider(),
+                                 todayIndex: 1,
+                                 baseMonday: monday,
+                                 eventStore: FakeEventKitStore(),
+                                 weatherProvider: fake)
+    ctl.open(day: 1)
+    for _ in 0..<12 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    // 用户原话：「我在设置里面打开了显示天气的选项，还是会跳出来
+    // 桌面课表想使用你当前的位置的请求授权的窗口」。
+    // 没选地区 → 一丁点都不许碰系统定位。
+    expectEqual(fake.requestCount, 0, "没选地区时不能请求系统定位（会弹位置授权框）")
+
+    // 选了地区 → 按地名 / 内置坐标取预报，仍然不碰定位。
+    settings.weatherCity = "秦皇岛"
+    ctl.updateSettings(settings)
+    for _ in 0..<12 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    expectEqual(fake.requestCount, 0, "选了地区之后也不能请求定位")
+    expect(fake.forecastRequestCount > 0, "选了地区要按地名取一次预报")
+
+    // 静态体检：provider 的 `requestCurrentLocation` 必须先判唯一开关，
+    // 否则将来某条新路径又会把授权框弹出来。
+    let root = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()   // Tests/
+        .deletingLastPathComponent()   // 仓库根
+    func source(_ rel: String) -> String {
+        (try? String(contentsOf: root.appendingPathComponent(rel), encoding: .utf8)) ?? ""
+    }
+    expect(source("Sources/DesktopTimetable/Model/WeatherProvider.swift")
+             .contains("guard Self.allowsSystemLocation else"),
+           "OpenMeteoWeatherProvider.requestCurrentLocation 必须先判 allowsSystemLocation")
+    expect(!source("Sources/DesktopTimetable/UI/SettingsWindowController.swift")
+             .contains("requestLocationAccess()"),
+           "设置面板的天气开关不能再调 requestLocationAccess()（会弹定位授权框）")
+    expect(!source("Sources/DesktopTimetable/UI/DayPanelController.swift")
+             .contains("fetchForecastAtCurrentLocation()"),
+           "loadWeather 不能再走「按当前定位取预报」")
 }
 
 suite("天气地区目录 · 热门 + 拼音首字母 + 搜索") {

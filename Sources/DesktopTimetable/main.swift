@@ -1156,6 +1156,127 @@ if arguments.contains("--verify-web-render") {
     if statusText.isEmpty {
         problems.append("状态条文字为空")
     }
+    // ---- 下课边界：网页侧也必须是**右开区间**（2026-11-11）----
+    //
+    // 用户反馈「课程已经结束了但是上面还是显示上课」。
+    // 根因：网页里判定「正在上课」用的是闭区间 `cur <= 结束` ——
+    // 到了下课那一刻（17:40）整整一分钟都还显示「正在上课 · 剩 0 分钟」。
+    // 现在改成 `cur < 结束`，下课那一刻就是「今日课程已结束」。
+    //
+    // 这里**在真实 WKWebView 里**验：用网页暴露的 `__ttStatusAtMinute(当天第 N 分钟)`
+    // 直接问「那个时刻状态条会显示什么」。
+    //
+    // ⚠️ 先塞一门**今天的课**进去 —— 否则状态条永远是「今天没有课」，
+    // 边界根本走不到，测了等于没测。
+    var injectDone = false
+    renderer.evaluateForTest("""
+    (function () {
+      try {
+        if (!window.ttUpdate) return 'no-ttUpdate';
+        var today = new Date().getDay();
+        var day = today === 0 ? 7 : today;
+        // 造一门「今天、每个 block 都上」的课 —— 边界才有意义。
+        var courses = [];
+        for (var b = 0; b < 5; b++) {
+          courses.push({ courseID: 'test-' + b, name: '边界测试课' + b, code: '',
+                         teacher: '测试', loc: '测试教室', day: day, block: b,
+                         weeks: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16],
+                         weeksLabel: '1-16', color: '#4f8cff' });
+        }
+        // ⚠️ **不能用 `S.xxx`**：`S` 是网页模块内的变量，这段注入代码在
+        // IIFE 里执行，作用域里根本没有 `S` → ReferenceError → 注入失败，
+        // 边界自检永远拿到「今天没有课」（2026-11-11 修）。
+        window.ttUpdate({ courses: courses, semesterStart: '2026-08-31',
+                          currentWeek: 1, viewWeek: 1,
+                          maxWeek: 16, title: '边界测试', subtitle: '',
+                          periods: window.__ttPeriods(), overrides: [] });
+        return 'ok';
+      } catch (err) { return 'ERR: ' + String((err && err.message) || err); }
+    })();
+    """) { r in
+        injectDone = true
+        print("  边界用例注入：\(r ?? "nil")")
+    }
+    let injDeadline = Date().addingTimeInterval(5)
+    while !injectDone && Date() < injDeadline {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    }
+    // 等网页把状态消化掉。
+    RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+
+    var boundaryTexts: String?
+    renderer.evaluateForTest("""
+    (function () {
+     try {
+      if (!window.__ttStatusAtMinute) return 'no-hook';
+      var P = window.__ttPeriods ? window.__ttPeriods() : [];
+      if (!P.length) return 'no-periods';
+      var toMin = function (t) { var p = String(t).split(':'); return parseInt(p[0],10)*60+parseInt(p[1],10); };
+      var out = [];
+      for (var i = 0; i < 5; i++) {
+        var sp = P[i*2], ep = P[i*2+1];
+        if (!sp || !ep) continue;
+        // 原生推来的作息是 `{ s, e }`，网页内部还会转成字符串数组。
+        var s = (typeof sp === 'string') ? sp : sp.s;
+        var e = (typeof ep === 'string') ? ep : ep.e;
+        if (!s || !e) continue;
+        var sm = toMin(s), em = toMin(e);
+        // 开始那一刻 / 结束前一分钟 / 结束那一刻
+        // ⚠️ 前缀 S / E 区分「开始」和「结束」，Swift 侧才能分别断言。
+        out.push('S' + sm + '=' + window.__ttStatusAtMinute(sm));
+        out.push('E' + (em - 1) + '=' + window.__ttStatusAtMinute(em - 1));
+        out.push('E' + em + '=' + window.__ttStatusAtMinute(em));
+      }
+      return out.join(' | ');
+     } catch (err) {
+      return 'ERR: ' + String((err && err.message) || err);
+     }
+    })();
+    """) { r in
+        boundaryTexts = r?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    let bdDeadline = Date().addingTimeInterval(5)
+    while boundaryTexts == nil && Date() < bdDeadline {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    }
+    if let bt = boundaryTexts {
+        print("  下课边界（网页侧）：\(bt)")
+        if bt != "no-hook" && bt != "no-periods" && !bt.hasPrefix("ERR") {
+            // 逐条解析「分钟=文案」——「结束那一刻」不该再是「正在上课」。
+            var samples = 0
+            var sawLive = false
+            for pair in bt.components(separatedBy: " | ") {
+                let parts = pair.components(separatedBy: "=")
+                guard parts.count == 2 else { continue }
+                let tag = parts[0]
+                let isStart = tag.hasPrefix("S")
+                let numText = String(tag.dropFirst())
+                guard let m = Int(numText) else { continue }
+                let text = parts[1]
+                samples += 1
+                if text.contains("正在上课") { sawLive = true }
+                // ⚠️ **上课开始那一刻就必须是「正在上课」**（2026-11-11 用户要求：
+                // 「如果现在课堂开始了，时间立刻就要更新，正在上的课也马上就要更新」）。
+                if isStart && !text.contains("正在上课") {
+                    problems.append("上课开始那一刻没有显示「正在上课」：\(m) 分钟时显示「\(text)」")
+                }
+                // 「结束那一刻」= 文案是「正在上课」但**剩 0 分钟** → 闭区间没改掉。
+                if text.contains("正在上课") && text.contains("剩 0 分钟") {
+                    problems.append("网页侧下课边界仍是闭区间：\(m) 分钟时显示「\(text)」")
+                }
+            }
+            if samples == 0 {
+                problems.append("网页侧下课边界自检没取到任何样本（自检失效）")
+            }
+            if !sawLive {
+                problems.append("网页侧下课边界自检没走到「正在上课」分支（自检失效）")
+            }
+        } else if bt.hasPrefix("ERR") {
+            problems.append("网页侧下课边界自检出错：\(bt)")
+        }
+    } else {
+        problems.append("拿不到网页的下课边界状态（自检失效）")
+    }
     // 呼吸圈省电回归：动画必须挂在伪元素的 transform / opacity 上。
     // 如果又有人把它改回 `box-shadow` 无限动画，这里会明确报出来。
     if pulseAnim != "pl" && pulseAnim != "pl-idle" {
@@ -1234,6 +1355,120 @@ if arguments.contains("--verify-web-render") {
 
     if problems.isEmpty {
         print("✅ 网页渲染自检通过")
+        exit(0)
+    }
+    for p in problems { print("❌ \(p)") }
+    exit(1)
+}
+
+if arguments.contains("--verify-wake-refresh") {
+    // 自检：**屏幕 / 系统唤醒后，卡片顶部的时钟与状态条必须立刻是当前的**
+    // （2026-11-11）。
+    //
+    // 用户原话：「刚打开显示屏的时候正在上课但是课表上没有显示我正在上课
+    // 而且时间晚了 1 分钟」。
+    //
+    // 根因：屏幕睡着时 **WebKit 挂起网页的定时器**（`setInterval(updateLiveTexts)`
+    // 不再触发），原生 `Timer` 也停；醒来后两边都要等下一个 10 秒档才恢复，
+    // 这中间卡片顶部显示的是**睡着前那一帧的旧值**。
+    //
+    // 修法：唤醒时主动重画（原生 `forceRefreshCard` + 网页 `tickClockNow`）。
+    // 这条自检把「旧值」模拟出来（直接把时钟文字改成 00:00），
+    // 再走一遍唤醒路径 —— 必须**立刻**回到当前时间。
+    let store = TimetableStore()
+    _ = try? store.migrateLegacyIfNeeded(defaultName: "我的课表")
+
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let delegate = AppDelegate()
+    app.delegate = delegate
+    delegate.prepareForRendering()
+
+    guard let renderer = delegate.testWebRenderer else {
+        print("❌ 没有渲染器")
+        exit(1)
+    }
+    var problems: [String] = []
+
+    let deadline = Date().addingTimeInterval(8)
+    while !renderer.isReady && Date() < deadline {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+    }
+    if !renderer.isReady {
+        print("❌ 网页在 8 秒内没有加载完")
+        exit(1)
+    }
+
+    /// 读网页里的时钟文字。
+    func readClock() -> String? {
+        var out: String?
+        renderer.evaluateForTest("""
+        (function () {
+          var tn = document.querySelector('.clock .tnum');
+          return tn ? tn.textContent.trim() : null;
+        })();
+        """) { r in
+            out = r?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let d = Date().addingTimeInterval(3)
+        while out == nil && Date() < d {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        return out
+    }
+
+    /// 把网页里的时钟改成一个**假的时间**（模拟「睡着时冻住的旧值」）。
+    func poisonClock() {
+        var done = false
+        renderer.evaluateForTest("""
+        (function () {
+          var tn = document.querySelector('.clock .tnum');
+          if (tn) { tn.textContent = '00:00'; return 'ok'; }
+          return 'no';
+        })();
+        """) { _ in done = true }
+        let d = Date().addingTimeInterval(3)
+        while !done && Date() < d {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+    }
+
+    let before = readClock()
+    print("  唤醒前时钟：\(before ?? "(读不到)")")
+
+    // 1) 把时钟「冻」在旧值上 —— 模拟屏幕睡着时网页定时器被挂起。
+    poisonClock()
+    let poisoned = readClock()
+    if poisoned != "00:00" {
+        problems.append("没能把时钟改成 00:00（读到 \(poisoned ?? "nil")）—— 自检失效")
+    }
+
+    // 2) 走唤醒路径 —— 必须立刻把时钟拉回当前时间。
+    delegate.testSimulateWake()
+    // 等一下回调（forceRefreshCard 里的 JS 是异步的）。
+    RunLoop.current.run(until: Date().addingTimeInterval(0.6))
+
+    let now = Date()
+    let comps = Calendar.current.dateComponents([.hour, .minute], from: now)
+    let want = String(format: "%02d:%02d", comps.hour ?? 0, comps.minute ?? 0)
+    let after = readClock()
+    print("  唤醒后时钟：\(after ?? "(读不到)")　期望：\(want)")
+    if after != want {
+        problems.append("唤醒后时钟没有回到当前时间：实际 \(after ?? "nil")，期望 \(want)")
+    }
+    if delegate.testWakeCount == 0 {
+        problems.append("唤醒路径没有被触发（testWakeCount == 0）")
+    }
+
+    // 3) 唤醒路径还应该再补一刀（网页定时器可能还没真正恢复）。
+    RunLoop.current.run(until: Date().addingTimeInterval(1.8))
+    let after2 = readClock()
+    if after2 != want {
+        problems.append("补刀之后时钟仍不对：实际 \(after2 ?? "nil")，期望 \(want)")
+    }
+
+    if problems.isEmpty {
+        print("✅ 唤醒后卡片顶部（时钟 / 状态条）立刻刷新：通过")
         exit(0)
     }
     for p in problems { print("❌ \(p)") }
@@ -2056,6 +2291,124 @@ if arguments.contains("--verify-panel-sections") {
         exit(0)
     }
     for p in problems { print("❌ \(p)") }
+    exit(1)
+}
+
+if arguments.contains("--verify-settings-closes-panel") {
+    // 自检：**打开设置时，展开的日期覆盖层要自动收回**（2026-11-11 用户要求）。
+    //
+    // 用户原话：「点开了设置之后展开的日历面板自动收回去」。
+    // 设置面板弹在课表卡片中心，而覆盖层还展开在那一列上 —— 两者叠在一起。
+    //
+    // 验的是**网页侧真的跟着收了**：`AppDelegate.openSettings()` 先把原生
+    // `currentDay` 清掉并推一版 `dayPanelOpen: false`，网页 `ttUpdate`
+    // 看到这个标志就播 400ms 收起动画（见 `Timetable.js` 里那条处理）。
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let delegate = AppDelegate()
+    app.delegate = delegate
+    // ⚠️ 用 `prepareForImportVerification`（= prepareForRendering + buildSettingsController）——
+    // `prepareForRendering` **不建** settingsController，而本自检要真的调 `openSettings()`，
+    // 那里的 `settingsController` 是隐式解包（nil 会立刻 SIGTRAP）。
+    delegate.prepareForImportVerification()
+
+    var problems: [String] = []
+    func check(_ cond: Bool, _ msg: String) { if !cond { problems.append(msg) } }
+
+    guard let renderer = delegate.testWebRenderer,
+          let window = delegate.testWindow,
+          let panel = delegate.testDayPanel else {
+        print("拿不到网页渲染器 / 卡片窗口 / 日期覆盖层")
+        exit(1)
+    }
+    for _ in 0..<120 {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        if renderer.isReady { break }
+    }
+    func pause(_ seconds: TimeInterval = 0.8) {
+        let end = Date().addingTimeInterval(seconds)
+        while Date() < end { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    }
+    pause(1.2)
+
+    var raw: String?
+    func eval(_ js: String) -> [String: Any]? {
+        raw = nil
+        renderer.evaluateForTest(js) { raw = $0 }
+        for _ in 0..<60 {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            if raw != nil { break }
+        }
+        guard let s = raw, let d = s.data(using: .utf8),
+              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return nil }
+        return o
+    }
+
+    NSApp.finishLaunching()
+    window.alphaValue = 1
+    window.orderFrontRegardless()
+    pause(0.4)
+
+    // 临时数据目录里没有课表 → `viewWeek` 是 nil（全部周次模式），
+    // 而全部周次模式下 `open(day:)` 会被守卫挡掉（面板不弹）。
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = .current
+    let todayStart = cal.startOfDay(for: Date())
+    let day = panel.testTodayIndex
+    if let monday = cal.date(byAdding: .day, value: -(day - 1), to: todayStart) {
+        panel.updateBrowsingWeek(baseMonday: monday, allWeeks: false)
+    }
+    panel.open(day: day)
+    pause(0.5)
+    _ = eval("(function(){ if (window.__ttDiagClick) window.__ttDiagClick(\(day)); return JSON.stringify({ ok: true }); })();")
+    pause(0.8)
+    // 自检窗口在自动化模式下不被合成器绘制：clip-path / opacity 停在起始值，
+    // 读可见性会失真。这里只钉成「看得见」，验的是逻辑，不是动画。
+    _ = eval("""
+    (function () {
+      var d = document.querySelector('.daypanel');
+      if (d) {
+        d.style.transition = 'none';
+        d.style.opacity = '1';
+        d.style.clipPath = 'none';
+        d.style.webkitClipPath = 'none';
+      }
+      return JSON.stringify({ ok: !!d });
+    })();
+    """)
+    pause(0.3)
+
+    let before = eval("""
+    (function () {
+      var p = window.ttDayPanelIsOpen ? window.ttDayPanelIsOpen() : { open: false };
+      return JSON.stringify({ open: p.open, day: p.day });
+    })();
+    """)
+    print("[诊断] 打开设置前的覆盖层：\(String(describing: before))")
+    check((before?["open"] as? Bool) == true,
+          "打开设置前覆盖层应当开着（实际 \(String(describing: before))，用例无效）")
+
+    delegate.testOpenSettings()
+    pause(1.2)
+    let after = eval("""
+    (function () {
+      var p = window.ttDayPanelIsOpen ? window.ttDayPanelIsOpen() : { open: true };
+      var d = document.querySelector('.daypanel');
+      return JSON.stringify({ open: p.open, cls: d ? d.className : 'none' });
+    })();
+    """)
+    print("[诊断] 打开设置后的覆盖层：\(String(describing: after))")
+    check((after?["open"] as? Bool) == false,
+          "打开设置之后日期覆盖层必须收起来（实际 \(String(describing: after))）")
+    delegate.closeSettingsForTest()
+    pause(0.3)
+
+    if problems.isEmpty {
+        print("✅ 打开设置时收起日期覆盖层：通过")
+        exit(0)
+    }
+    for p in problems { print("❌ \(p)") }
+    print("❌ 打开设置时收起日期覆盖层：失败 \(problems.count) 项")
     exit(1)
 }
 
@@ -6209,8 +6562,10 @@ if arguments.contains("--verify-day-panel") {
     fakeWeather.forecast = [
         "2026-11-04": DayPanelWeather(text: "晴", temperature: 12, min: 12, max: 21),
     ]
+    // ⚠️ 2026-11-11 起天气只走「手填地区」，没地区**不请求定位** ——
+    // 这个用例要验「天气进内容」，必须显式给一个地区。
     let weatherController = DayPanelController(
-        settings: DayPanelSettings(enabled: true, weatherEnabled: true),
+        settings: DayPanelSettings(enabled: true, weatherEnabled: true, weatherCity: "秦皇岛"),
         festivalProvider: DayPanelFestivalProviderFactory.make(weatherProvider: fakeWeather),
         todayIndex: 1,
         baseMonday: day(2026, 11, 2),
@@ -6233,9 +6588,24 @@ if arguments.contains("--verify-day-panel") {
           "7 天详情里对应日期的那一列也要带天气（否则网页覆盖后天气消失）")
     check(pushedFestival?["weatherEnabled"] as? Bool == true,
           "7 天详情里要带 weatherEnabled")
-    // ⚠️ 2026-11-10：没填地区时 region 是空串 —— 网页据此提示「请在设置里选择地区」。
-    check(pushedFestival?["region"] as? String == "",
-          "没填地区时 region 要是空串（实际 \(String(describing: pushedFestival?["region"]))）")
+    // ⚠️ 2026-11-11：**没填地区**时（a）region 是空串（网页提示「请在设置里选择地区」），
+    // （b）**一个定位请求都不能发**（用户明确要求别再弹「想使用你当前的位置」）。
+    // 用另一个 controller 单独验，避免和上面「有地区」的用例混在一起。
+    let noRegionWeather = FakeWeatherProvider()
+    let noRegionController = DayPanelController(
+        settings: DayPanelSettings(enabled: true, weatherEnabled: true, weatherCity: ""),
+        festivalProvider: DayPanelFestivalProviderFactory.make(weatherProvider: noRegionWeather),
+        todayIndex: 1,
+        baseMonday: day(2026, 11, 2),
+        eventStore: FakeEventKitStore(),
+        weatherProvider: noRegionWeather)
+    noRegionController.open(day: 3)
+    for _ in 0..<10 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    let noRegionFestival = noRegionController.currentFestivalsJSON()["3"] as? [String: Any]
+    check(noRegionFestival?["region"] as? String == "",
+          "没填地区时 region 要是空串（实际 \(String(describing: noRegionFestival?["region"]))）")
+    check(noRegionWeather.requestCount == 0,
+          "没填地区时不能请求系统定位（会弹位置授权框，实际 \(noRegionWeather.requestCount) 次）")
 
     // 填了地区 → 地区名要随 7 天详情一起推给网页。
     let regionWeather = FakeWeatherProvider(stub: DayPanelWeather(text: "晴", temperature: 12, min: 12, max: 21))
@@ -7471,10 +7841,12 @@ if arguments.contains("--verify-day-panel") {
         check((o["hourWrapDown"] as? String) == "23", "时 00 再按 ↓ 要回到 23（实际 \(o["hourWrapDown"] ?? "nil")）")
         check((o["minuteWrapUp"] as? String) == "00", "分 59 再按 ↑ 要回到 00（实际 \(o["minuteWrapUp"] ?? "nil")）")
         check((o["emptyUp"] as? String) == "01", "空框按 ↑ 要变成 01（实际 \(o["emptyUp"] ?? "nil")）")
-        check((o["focusAfterMinute"] as? String) == "hour",
-              "分框填满两位要自动跳回时框（实际 \(o["focusAfterMinute"] ?? "nil")）")
-        check((o["focusAfterHour"] as? String) == "minute",
-              "时框填满两位要自动跳到分框（实际 \(o["focusAfterHour"] ?? "nil")）")
+        // ⚠️ **「填满两位自动跳栏」已经被你删掉了**（2026-11-11 凌晨用户要求）——
+        // 这两条读数（焦点跑到哪个框）现在**没有断言价值**：脚本没有主动 focus
+        // 被设置的那个框，读数反映的是上一轮留下的焦点，不是产品的跳栏行为。
+        // 只把读数打出来供排查，不再参与通过 / 失败。
+        print("  时间框焦点读数（自动跳栏已删除，仅供参考）："
+              + "分→\(o["focusAfterMinute"] ?? "nil") 时→\(o["focusAfterHour"] ?? "nil")")
     } else {
         fail("拿不到时间键盘行为的诊断结果")
     }
@@ -7526,9 +7898,11 @@ if arguments.contains("--verify-day-panel") {
       set(t, '带时间的待办');
       set(h, '20');
       set(m, '00');
-      // ⚠️ 分框填满两位会自动跳回**时框**（新的交互）——
-      // 回车要发给当前焦点所在的那个框，不能写死发给了 m。
-      (document.activeElement || m).dispatchEvent(new KeyboardEvent('keydown',
+      // ⚠️ 「填满两位自动跳栏」已经删掉（2026-11-11）—— 焦点不会自己跑到
+      // 别的框上，`document.activeElement` 可能还停在 body。这里**显式 focus**
+      // 到分框再回车，测的才是「回车提交」本身。
+      m.focus();
+      m.dispatchEvent(new KeyboardEvent('keydown',
         { key: 'Enter', keyCode: 13, bubbles: true, cancelable: true }));
       var p = window.__ttLastPost || {};
       return JSON.stringify({
@@ -7639,9 +8013,15 @@ if arguments.contains("--verify-day-panel") {
       }
       window.__ttLastPost = null;
       set(t, '非法时间');
+      // ⚠️ **必须显式 focus 到时间框再回车**（2026-11-11）：
+      // 以前靠 `document.activeElement` —— 而「填满两位自动跳栏」删掉之后，
+      // 焦点还停在上一个操作留下的位置（往往是 body），Enter 派发不到输入框上，
+      // 于是这条用例永远拿不到错误提示（假红）。
       set(h, '25');
+      h.focus();
       set(m, '00');
-      (document.activeElement || m).dispatchEvent(new KeyboardEvent('keydown',
+      m.focus();
+      m.dispatchEvent(new KeyboardEvent('keydown',
         { key: 'Enter', keyCode: 13, bubbles: true, cancelable: true }));
       var p = window.__ttLastPost || {};
       var err = document.querySelector('.dpadderr');
@@ -12030,6 +12410,440 @@ if arguments.contains("--verify-day-panel-click") {
     }
     for p in problems { print("❌ \(p)") }
     print("❌ 日期覆盖层真实点击（添加待办 / 圆圈完成）：失败 \(problems.count) 项")
+    exit(1)
+}
+
+if arguments.contains("--verify-complete-flicker") {
+    // 自检：**点待办圆圈完成之后，那一列 / 那几条待办不能一直闪**。
+    //
+    // 用户原话（2026-11-11 晚）：
+    //   「每一次打开日历那一列之后，点击了完成之后就会一直闪」
+    //
+    // ⚠️ 为什么现有 `--verify-day-panel-click` 复现不出来：
+    // 自动化模式注入的是 `EmptyEventKitStore` —— `setReminder` 永远返回失败，
+    // 原生只会走「写回失败 → 原样推回」那条分支，**永远走不到**
+    // 「写回成功 → 重取数（可能读到旧快照）→ 补推」。
+    // 这里换成 `FakeEventKitStore`（真的写进数据 + 异步回调 + 写后读旧快照），
+    // 把真实链路补齐，再用**真实鼠标事件**点圆圈，然后盯 4 秒：
+    //   · 面板的 class / 位置 / 高度；
+    //   · `.dpcards` 里待办的 key 序列（「消失又回来」= 闪）；
+    //   · 网页真正重建面板的次数（`renderPanel` 命中指纹早退的不算）。
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let delegate = AppDelegate()
+    app.delegate = delegate
+    delegate.prepareForRendering()
+
+    var problems: [String] = []
+    func fail(_ s: String) { problems.append(s) }
+    func check(_ cond: Bool, _ msg: String) { if !cond { fail(msg) } }
+
+    guard let renderer = delegate.testWebRenderer,
+          let window = delegate.testWindow,
+          let panel = delegate.testDayPanel else {
+        print("拿不到网页渲染器 / 卡片窗口 / 日期覆盖层")
+        exit(1)
+    }
+    for _ in 0..<120 {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        if renderer.isReady { break }
+    }
+    func pause(_ seconds: TimeInterval = 0.8) {
+        let end = Date().addingTimeInterval(seconds)
+        while Date() < end { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    }
+    pause(1.2)
+
+    var raw: String?
+    func eval(_ js: String) -> [String: Any]? {
+        raw = nil
+        renderer.evaluateForTest(js) { raw = $0 }
+        for _ in 0..<60 {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            if raw != nil { break }
+        }
+        guard let s = raw, let d = s.data(using: .utf8),
+              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return nil }
+        return o
+    }
+
+    NSApp.finishLaunching()
+    window.alphaValue = 1
+    window.orderFrontRegardless()
+    pause(0.4)
+    let webH = renderer.webView.bounds.height
+
+    @discardableResult
+    func realClick(_ selector: String, _ what: String) -> Bool {
+        guard let c = eval("""
+        (function () {
+          var el = document.querySelector('\(selector)');
+          if (!el) return '';
+          var r = el.getBoundingClientRect();
+          var x = r.x + r.width / 2, y = r.y + r.height / 2;
+          var under = document.elementFromPoint(x, y);
+          return JSON.stringify({ x: x, y: y,
+            under: under ? (under.className || under.tagName) : 'null' });
+        })();
+        """),
+              let x = (c["x"] as? NSNumber)?.doubleValue,
+              let y = (c["y"] as? NSNumber)?.doubleValue else {
+            fail("找不到要点的元素：\(what)（\(selector)）")
+            return false
+        }
+        let wp = NSPoint(x: x, y: webH - y)
+        guard let hitView = window.contentView?.hitTest(wp) else {
+            fail("点击点没有命中任何视图：\(what)")
+            return false
+        }
+        print("[诊断] 点 \(what)：css=(\(Int(x)),\(Int(y))) elementFromPoint=\(c["under"] ?? "?") "
+              + "命中视图=\(String(describing: type(of: hitView))) alpha=\(window.alphaValue)")
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            guard let ev = NSEvent.mouseEvent(with: type, location: wp, modifierFlags: [],
+                                              timestamp: ProcessInfo.processInfo.systemUptime,
+                                              windowNumber: window.windowNumber, context: nil,
+                                              eventNumber: 0, clickCount: 1,
+                                              pressure: type == .leftMouseUp ? 0 : 1) else {
+                fail("造不出鼠标事件：\(what)")
+                return false
+            }
+            switch type {
+            case .leftMouseDown: hitView.mouseDown(with: ev)
+            case .leftMouseUp: hitView.mouseUp(with: ev)
+            default: break
+            }
+        }
+        return true
+    }
+
+    // ---- 1) 换成一个「真的写回」的 EventKit ----
+    let fake = FakeEventKitStore()
+    fake.appliesToggle = true
+    fake.toggleDelay = 0.12          // 真实 EventKit 的写回是异步的
+    fake.simulateStaleReads = 2      // 写后读旧快照（真实 EventKit 常见）
+    // 「逾期 1 条」→ 让今天那一列出现黄色摘要卡（`今天 N 条待处理 · 逾期 M 条`）。
+    // 用户报的「黄色待办事项一直闪」就是这张卡在消失 / 回来。
+    fake.overduePendingCount = 1
+    // 真实 EventKit 的「逾期几条」是跨进程异步查询 —— 给 0.3 秒延迟，
+    // 才能采样到「摘要卡先消失、再回来」那个中间态。
+    fake.overdueDelay = 0.3
+    fake.todos = [
+        DayPanelTodo(title: "要完成的那条", due: "09:00", done: false, dueMinutes: 9 * 60,
+                     identifier: "flicker-1", calendarIdentifier: "c1"),
+        DayPanelTodo(title: "留下来的那条", due: "10:00", done: false, dueMinutes: 10 * 60,
+                     identifier: "flicker-2", calendarIdentifier: "c1"),
+        // ⚠️ 真实用户的列里常常有 5～8 条（内容超过一列高度 → 面板内滚动）。
+        // 只放 2 条的话量不出「内容变短 → 滚动 / 高度重算」这一类抖动。
+        DayPanelTodo(title: "待办 3", due: "11:00", done: false, dueMinutes: 11 * 60,
+                     identifier: "flicker-3", calendarIdentifier: "c1"),
+        DayPanelTodo(title: "待办 4", due: "12:00", done: false, dueMinutes: 12 * 60,
+                     identifier: "flicker-4", calendarIdentifier: "c1"),
+        DayPanelTodo(title: "待办 5", due: "13:00", done: false, dueMinutes: 13 * 60,
+                     identifier: "flicker-5", calendarIdentifier: "c1"),
+        DayPanelTodo(title: "待办 6", due: "14:00", done: false, dueMinutes: 14 * 60,
+                     identifier: "flicker-6", calendarIdentifier: "c1")
+    ]
+    panel.testReplaceStore(fake)
+    // 覆盖层要查待办，必须先打开「接入提醒事项」开关（临时目录默认关着）。
+    var panelSettings = panel.settings
+    panelSettings.enabled = true
+    panel.updateSettings(panelSettings)
+    // ⚠️ 临时数据目录里没有课表 → `viewWeek` 是 nil（全部周次模式），
+    // 而全部周次模式下 `open(day:)` 会被守卫直接挡掉（面板不弹）。
+    // 这里按「今天」摆好这一周的周一，再把 allWeeks 关掉。
+    let day = panel.testTodayIndex
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = .current
+    let todayStart = cal.startOfDay(for: Date())
+    if let monday = cal.date(byAdding: .day, value: -(day - 1), to: todayStart) {
+        panel.updateBrowsingWeek(baseMonday: monday, allWeeks: false)
+    }
+    panel.open(day: day)
+    pause(0.6)
+    var fakeCount = -1
+    fake.reminders(on: panel.testDate(day: day) ?? Date()) { fakeCount = $0.count }
+    print("[诊断] fake 直接取数：\(fakeCount) 条 / fake.todos=\(fake.todos.count)")
+    print("[诊断] 原生 content：state=\(panel.testState) ready=\(panel.testContent.ready) "
+          + "todos=\(panel.testContent.todos.count) enabled=\(panel.settings.enabled) "
+          + "auth=\(fake.reminderAuthorization.rawValue)")
+    // 网页的覆盖层**只由「点表头」打开**（规格：触发 = 点表头日期格）。
+    // 原生 `open(day:)` 只负责推内容；这里补一下真实入口。
+    _ = eval("(function(){ if (window.__ttDiagClick) window.__ttDiagClick(\(day)); return JSON.stringify({ ok: true }); })();")
+    pause(1.2)
+    // ⚠️ 自检窗口在自动化模式下**不被合成器绘制**：CSS 过渡停在起始值
+    // （opacity=0 / clip-path 完全裁掉）→ 命中测试会穿透到下面的课表格，
+    // 真实点击永远点不到面板里的圆圈。和 `--verify-day-panel-click` 一样，
+    // 用行内样式把面板钉成「完全可见」——只验点击链路，不验入场动画。
+    _ = eval("""
+    (function () {
+      var d = document.querySelector('.daypanel');
+      if (!d) return JSON.stringify({ ok: false });
+      d.style.transition = 'none';
+      d.style.opacity = '1';
+      d.style.clipPath = 'none';
+      d.style.webkitClipPath = 'none';
+      return JSON.stringify({ ok: true });
+    })();
+    """)
+    pause(0.3)
+    print("[诊断] 网页状态：\(eval("""
+    (function () {
+      var d = document.querySelector('.daypanel');
+      var body = document.querySelector('.dpbody');
+      return JSON.stringify({
+        open: window.ttDayPanelIsOpen ? window.ttDayPanelIsOpen() : null,
+        hasPanel: !!d,
+        cards: document.querySelectorAll('.dpcard').length,
+        text: body ? body.textContent.replace(/\\s+/g, ' ').slice(0, 160) : 'none'
+      });
+    })();
+    """).map { "\($0)" } ?? "nil")")
+
+    // ---- 2) 装探针 ----
+    _ = eval("""
+    (function () {
+      try {
+        window.__TT_PANEL_TRACE = true;
+        window.__ttRenders = [];
+        window.__ttCardLog = [];
+        window.__ttPanelLog = [];
+        window.__ttSeq = function () {
+          var out = [];
+          var cards = document.querySelectorAll('.dpcards .dpcard.todo');
+          for (var i = 0; i < cards.length; i++) {
+            out.push(cards[i].getAttribute('data-todo-key') || '?');
+          }
+          return out.join(',');
+        };
+        // 所有卡片的 node-key（含「今天 N 条待处理 · 逾期 M 条」那张黄色摘要卡）——
+        // 用来验「摘要卡不能闪一下消失再回来」。
+        window.__ttAllSeq = function () {
+          var out = [];
+          var cards = document.querySelectorAll('.dpcards > .dpcard');
+          for (var i = 0; i < cards.length; i++) {
+            out.push(cards[i].getAttribute('data-node-key') || '?');
+          }
+          return out.join(',');
+        };
+        window.__ttLastAll = window.__ttAllSeq();
+        window.__ttAllLog = [];
+        window.__ttLastSeq = window.__ttSeq();
+        window.__ttCardObs = new MutationObserver(function () {
+          var s = window.__ttSeq();
+          var all = window.__ttAllSeq();
+          if (s !== window.__ttLastSeq) {
+            window.__ttLastSeq = s;
+            window.__ttCardLog.push({ t: Math.round(performance.now()), seq: s });
+          }
+          if (all !== window.__ttLastAll) {
+            window.__ttLastAll = all;
+            window.__ttAllLog.push({ t: Math.round(performance.now()), all: all });
+          }
+        });
+        var box = document.querySelector('.dpcards');
+        if (box) window.__ttCardObs.observe(box, { childList: true, subtree: true });
+        window.__ttLastCls = '';
+        window.__ttPanelObs = new MutationObserver(function () {
+          var d = document.querySelector('.daypanel');
+          if (!d) return;
+          var c = d.className + ' h=' + Math.round(d.getBoundingClientRect().height)
+                + ' op=' + getComputedStyle(d).opacity;
+          if (c !== window.__ttLastCls) {
+            window.__ttLastCls = c;
+            window.__ttPanelLog.push({ t: Math.round(performance.now()), v: c });
+          }
+        });
+        var dp = document.querySelector('.daypanel');
+        if (dp) window.__ttPanelObs.observe(dp, { attributes: true, attributeFilter: ['class', 'style'] });
+        return JSON.stringify({ ok: true, cards: window.__ttLastSeq });
+      } catch (e) {
+        return JSON.stringify({ ok: false, err: String(e && (e.stack || e)) });
+      }
+    })();
+    """).map { obj in
+        print("[诊断] 注入后待办序列：\(obj["cards"] ?? "nil") 探针异常=\(obj["err"] ?? "无")")
+        check((obj["cards"] as? String ?? "").contains("flicker-1"),
+              "注入的两条待办要真的出现在面板里（实际 \(obj["cards"] ?? "nil")，"
+              + "err=\(obj["err"] ?? "无")）")
+    }
+
+    // ---- 3) 真实点击圆圈 ----
+    // 用「第一张待办卡片的圆圈」（09:00 那条 = flicker-1，排序在第一）。
+    // ⚠️ 不用 `[data-todo-key=…]` 属性选择器：key 里带冒号（`id:`），
+    // 属性选择器对这种值在不同 WebKit 版本上行为不一致，按位置取更稳。
+    let clicked = realClick(".dpcards .dpcard.todo .dpcheck",
+                            "待办圆圈（完成）")
+
+    // 真实环境里 EventKit 写回成功之后，系统会发 `EKEventStoreChanged`，
+    // 原生防抖 0.4 秒后**再刷新一次**（refreshAll + loadContent → 又推一版）。
+    // 自检里不补这一步，就等于只验了「第一次推送」，验不到「补推」。
+    pause(0.35)
+    NotificationCenter.default.post(name: .EKEventStoreChanged, object: nil)
+    // 指针还停在圆圈原来的位置（用户点完手没动）—— 补一次指针移动，
+    // 让 `onPointerMove` 的跟随逻辑也参与（真实鼠标在合成器里会持续产生 mouseMoved）。
+    _ = eval("(function(){ if (window.__ttDiagMove) window.__ttDiagMove(517, 381); return JSON.stringify({ ok: true }); })();")
+
+    // ---- 4) 盯 4 秒 ----
+    var timeline: [String] = []
+    // 全卡片序列（含黄色摘要卡）的变化时间线 —— 轮询采样，不依赖 MutationObserver
+    //（无合成器环境里 observer 的回调时机会抖，采样更稳）。
+    var allTimeline: [String] = []
+    for step in 0..<40 {
+        pause(0.1)
+        guard let s = eval("""
+        (function () {
+          var d = document.querySelector('.daypanel');
+          var b = document.querySelector('.dpbody');
+          return JSON.stringify({
+            t: Math.round(performance.now()),
+            seq: window.__ttSeq(),
+            all: window.__ttAllSeq ? window.__ttAllSeq() : '',
+            renders: (window.__ttRenders || []).length,
+            cls: d ? d.className : 'none',
+            h: d ? Math.round(d.getBoundingClientRect().height) : 0,
+            bodyH: d ? d.style.getPropertyValue('--dp-body-h') : '',
+            scroll: b ? Math.round(b.scrollTop) : 0,
+            dh: b ? Math.round(b.getBoundingClientRect().height) : 0
+          });
+        })();
+        """) else { continue }
+        let line = "\(step * 100)ms seq=\(s["seq"] ?? "?") renders=\(s["renders"] ?? "?") "
+            + "cls=\(s["cls"] ?? "?") h=\(s["h"] ?? "?") "
+            + "bodyH=\(s["bodyH"] ?? "?") scroll=\(s["scroll"] ?? "?") dh=\(s["dh"] ?? "?")"
+        if timeline.last != line.dropFirst(line.split(separator: " ").first?.count ?? 0).description {
+            timeline.append(line)
+        }
+        if let all = s["all"] as? String, allTimeline.last != all {
+            allTimeline.append(all)
+        }
+        if step % 5 == 0 { print("[诊断] " + line) }
+    }
+    pause(0.5)
+
+    guard let report = eval("""
+    (function () {
+      return JSON.stringify({
+        renders: (window.__ttRenders || []).length,
+        renderLog: (window.__ttRenders || []).slice(0, 20),
+        cardLog: window.__ttCardLog || [],
+        allLog: window.__ttAllLog || [],
+        panelLog: window.__ttPanelLog || [],
+        seq: window.__ttSeq(),
+        open: window.ttDayPanelIsOpen ? window.ttDayPanelIsOpen().open : false,
+        day: window.ttDayPanelIsOpen ? window.ttDayPanelIsOpen().day : null
+      });
+    })();
+    """) else {
+        print("读不到探针结果")
+        exit(1)
+    }
+
+    let cardLog = report["cardLog"] as? [[String: Any]] ?? []
+    let panelLog = report["panelLog"] as? [[String: Any]] ?? []
+    let renderLog = report["renderLog"] as? [[String: Any]] ?? []
+    let renders = (report["renders"] as? NSNumber)?.intValue ?? 0
+    print("[诊断] 4 秒内：面板重建 \(renders) 次，卡片序列变化 \(cardLog.count) 次，"
+          + "面板 class/尺寸变化 \(panelLog.count) 次")
+    print("[诊断] 面板重建时间线：")
+    for r in renderLog { print("    \(r)") }
+    print("[诊断] 卡片序列时间线：")
+    for c in cardLog { print("    \(c)") }
+    let allLog = report["allLog"] as? [[String: Any]] ?? []
+    print("[诊断] 全卡片序列时间线（含黄色摘要卡 todo-digest）：")
+    for a in allLog { print("    \(a)") }
+    print("[诊断] 面板外观时间线：")
+    for p in panelLog { print("    \(p)") }
+
+    check(clicked, "必须能真实点到待办圆圈")
+    check((report["open"] as? Bool) == true, "点完成之后面板不能消失")
+    // 「闪」= 那一列/那条待办在视觉上反复出现又消失。
+    // 完成一条 → key 序列应当**单调减少**（flicker-1 消失、flicker-2 留着），
+    // 中途出现「又变多了」就是复活 / 闪回。
+    var prevCount = -1
+    var regressions = 0
+    for c in cardLog {
+        let seq = (c["seq"] as? String) ?? ""
+        let count = seq.isEmpty ? 0 : seq.split(separator: ",").count
+        if prevCount >= 0 && count > prevCount { regressions += 1 }
+        prevCount = count
+    }
+    check(regressions == 0,
+          "完成后待办序列不能回弹（出现 \(regressions) 次「消失又回来」）")
+
+    // 黄色摘要卡（「今天 N 条待处理 · 逾期 M 条」）**不能整张消失再回来**。
+    //
+    // 用户原话：「应该是黄色待办事项的原因」。真机日志里 `.dpcards` 的卡片数
+    // 在 6 ↔ 7 之间跳 —— 差的那一张就是它：`loadContent` 每次都先把
+    // `content.todoDigest` 清空推一版（卡片消失、下面整体上移），
+    // 0.35 秒后异步回包再补回来（卡片出现、整体下移）。
+    // 一次刷新上下跳两下 = 用户看到的「一直闪」。
+    print("[诊断] 摘要卡采样序列：")
+    for a in allTimeline { print("    \(a)") }
+    var firstDigest = -1
+    for (i, a) in allTimeline.enumerated() {
+        if a.contains("todo-digest") { firstDigest = i; break }
+    }
+    check(firstDigest >= 0,
+          "今天那一列应当出现黄色摘要卡「今天 N 条待处理 · 逾期 M 条」（实际没出现，用例无效）")
+    if firstDigest >= 0 {
+        var lostAfter = 0
+        for a in allTimeline[firstDigest...] {
+            if !a.contains("todo-digest") { lostAfter += 1 }
+        }
+        check(lostAfter == 0,
+              "摘要卡出现之后不能消失再回来（实际消失 \(lostAfter) 次）—— 那就是「黄色那张一直闪」")
+    }
+    check(renders <= 6,
+          "点一次完成之后面板最多重建 6 次（实际 \(renders) 次）—— 太多就是一直闪")
+    check(panelLog.count <= 4,
+          "点一次完成之后面板外观最多变 4 次（实际 \(panelLog.count) 次）")
+
+    // ---- 5) 回归：内容相同、**只是 JSON 键序不同**的推送不能重建面板 ----
+    //
+    // 这条是「一直闪」的真凶（真机日志 `DT_FLICKER_DIAG=1` 实测：
+    // 打开一列之后 4 秒内重建了 **15 次**，每推一次闪一下）。
+    //
+    // 原生推来的是 Swift `[String: Any]`，序列化成 JSON 之后**键的顺序不固定**；
+    // 网页原来用 `JSON.stringify(data)` 做「内容有没有变」的指纹 →
+    // 同样的内容、换个键序就判成「变了」→ 整块重建 → 半透明玻璃闪一下。
+    //
+    // 修法：指纹改用键序无关的 `stableStringify`。这条用例守住它。
+    let keyOrder = eval("""
+    (function () {
+      var t = { title: '键序待办', due: '15:00', done: false,
+                identifier: 'keyorder-1', calendarIdentifier: 'c1' };
+      var pA = { day: 3, todos: [t], events: [], ready: true,
+                 festival: { lunar: '十月初三', term: '', festivals: [],
+                             yi: '除服', ji: '出行' } };
+      var pB = { ready: true,
+                 festival: { ji: '出行', yi: '除服', festivals: [],
+                             term: '', lunar: '十月初三' },
+                 events: [], todos: [t], day: 3 };
+      window.__ttRenders = [];
+      window.ttDayPanelSetState({ dayPanel: pA, dayPanelOpen: true });
+      var n1 = window.__ttRenders.length;
+      window.ttDayPanelSetState({ dayPanel: pB, dayPanelOpen: true });
+      var n2 = window.__ttRenders.length;
+      return JSON.stringify({ n1: n1, n2: n2 });
+    })();
+    """)
+    if let keyOrder {
+        let n1 = (keyOrder["n1"] as? NSNumber)?.intValue ?? -1
+        let n2 = (keyOrder["n2"] as? NSNumber)?.intValue ?? -2
+        print("[诊断] 键序回归：第一次推送重建 \(n1) 次，键序不同的同内容推送后 \(n2) 次")
+        check(n1 >= 1, "同内容不同键序的用例：第一次推送应当真的重建了一次（实际 \(n1)）")
+        check(n2 == n1,
+              "内容相同、只是 JSON 键序不同的推送**不能**重建面板（实际 \(n1) → \(n2)）")
+    } else {
+        fail("键序回归用例执行失败（读不到结果）")
+    }
+
+    if problems.isEmpty {
+        print("✅ 点完成之后不闪：通过")
+        exit(0)
+    }
+    for p in problems { print("❌ \(p)") }
+    print("❌ 点完成之后不闪：失败 \(problems.count) 项")
     exit(1)
 }
 

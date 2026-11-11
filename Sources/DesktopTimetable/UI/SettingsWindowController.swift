@@ -2869,8 +2869,11 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
 
     /// 天气开关切换。
     ///
-    /// 开 → 请求一次定位授权（系统弹窗）。
-    /// 关 → 立刻不再显示天气（不用等下次打开覆盖层）。
+    /// ⚠️ **开 / 关都不再请求定位**（2026-11-11 用户要求）。
+    ///
+    /// 用户原话：「我在设置里面打开了显示天气的选项，还是会跳出来桌面课表
+    /// 想使用你当前的位置的请求授权的窗口」。
+    /// 天气只走「设置里手动选地区」，打开开关不再碰定位权限。
     private func dayPanelWeatherToggled(_ enabled: Bool) {
         var current = appSettings
         current.dayPanel.weatherEnabled = enabled
@@ -2881,9 +2884,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
             NSLog("[DesktopTimetable] 保存天气设置失败：%@", error.localizedDescription)
         }
         dayPanelController?.updateSettings(current.dayPanel)
-        if enabled {
-            dayPanelController?.requestLocationAccess()
-        }
         refreshDayPanelRows()
     }
 

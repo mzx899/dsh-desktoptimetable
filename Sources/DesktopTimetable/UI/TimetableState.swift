@@ -112,11 +112,20 @@ struct TimetableState {
     var minutesNow: Int { WeekMath.minutesSinceMidnight(now) }
 
     /// 当前正在上的课（block 索引），没有则 nil。
+    ///
+    /// ⚠️ **右开区间** `[开始, 结束)`（2026-11-11 修「课已经结束了还显示正在上课」）。
+    ///
+    /// 以前是闭区间（`cur <= 结束`）→ 到了**下课那一刻**（比如 17:40）
+    /// 整整一分钟都还显示「正在上课 · 剩 0 分钟」。
+    /// 下课到下一节课之间**没有下一节**，那一分钟状态条特别显眼地挂着「正在上课」。
+    ///
+    /// ⚠️ 网页那边 `Timetable.js` 的 `render` / `liveContext` **必须一样**，
+    /// 否则原生算的「正在上课」和网页自己算的对不上（切周时会出现闪烁）。
     var currentBlock: Int? {
         let cur = minutesNow
         for i in 0...Self.maxBlock {
             guard let s = Self.blockStart(i), let e = Self.blockEnd(i) else { continue }
-            if cur >= Schedule.minutes(s) && cur <= Schedule.minutes(e) { return i }
+            if cur >= Schedule.minutes(s) && cur < Schedule.minutes(e) { return i }
         }
         return nil
     }

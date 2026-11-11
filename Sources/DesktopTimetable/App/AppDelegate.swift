@@ -45,6 +45,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastReminderDay = WeekMath.calendar.startOfDay(for: Date())
     /// 睡醒 / 激活时补排。
     private var wakeObserver: NSObjectProtocol?
+    /// **显示器**唤醒（系统没睡，只是屏幕关了）—— 2026-11-11 加。
+    ///
+    /// 用户原话：「刚打开显示屏的时候正在上课但是课表上没有显示我正在上课
+    /// 而且时间晚了 1 分钟」。笔记本合盖 / 手动关屏走的是这条通知，
+    /// 不是 `didWakeNotification` —— 只监听后者会漏。
+    private var screenWakeObserver: NSObjectProtocol?
 
     /// 当前课表元数据（标题 / 副标题从这儿读，不再写死）。
     private var currentTimetable: Timetable? {
@@ -287,6 +293,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.dayPanel?.open(day: day)
             }
         }
+        // 诊断开关：`DT_FLICKER_DIAG=1` → 打开网页侧的「覆盖层重建 / 外观变化」探针。
+        //
+        // 用户报「点完成之后一直闪」——现象只在**真实合成器 + 真实提醒事项**里出现，
+        // 自检（无合成器）复现不出来。打开这个开关之后，网页每真正重建一次覆盖层、
+        // 每次外观变化都会写一条统一日志：
+        //   log show --last 10m --info --predicate 'subsystem == "com.desktoptimetable.diag"'
+        // 时间线里能直接看出「是不是原生在反复推送」。
+        if ProcessInfo.processInfo.environment["DT_FLICKER_DIAG"] == "1" {
+            for delay in [2.0, 6.0, 20.0] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    self?.webRenderer?.webView.evaluateJavaScript(
+                        "if (window.__ttEnablePanelTrace) window.__ttEnablePanelTrace();")
+                }
+            }
+        }
         // 排查用：`DT_OPEN_SETTINGS=1` → 启动 1.5 秒后自动开一次设置面板，
         // 再看第 2 次是不是落在同一处（复现「第一次开在左下角」）。
         if ProcessInfo.processInfo.environment["DT_OPEN_SETTINGS"] == "1" {
@@ -324,10 +345,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 睡眠唤醒后补足 14 天窗口 —— 睡一觉醒来，窗口可能已经空了。
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-                // 睡过了午夜：唤醒后立刻对一次日期（天气 / 今日摘要跟着换）。
-                self?.dayPanel?.handleDayChange()
-                self?.refreshReminderSchedule()
-            }
+            self?.handleSystemWake()
+        }
+        // ⚠️ **显示器单独唤醒**也要处理（2026-11-11，用户原话：
+        // 「刚打开显示屏的时候……时间晚了 1 分钟、没显示正在上课」）。
+        //
+        // 笔记本合盖 / 手动关屏时，**系统不一定睡眠**，只是**显示器睡了**。
+        // 这时发的是 `screensDidWake`（不是 `didWake`）——
+        // 只监听 `didWake` 就会漏掉这个场景。
+        //
+        // 两种唤醒的共同点：**WebKit 挂起了网页的定时器**（`setInterval` 不再触发），
+        // 原生 `Timer` 也停。醒来后两边都要等下一个 10 秒档才恢复，
+        // 这中间卡片顶部显示的是**睡着前那一帧的旧值**。
+        screenWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.handleSystemWake()
+        }
 
         // 调试：DT_CLICK="x,y" 启动后自动点一下该坐标，用于验证点击转发链路
         if let spec = ProcessInfo.processInfo.environment["DT_CLICK"] {
@@ -386,6 +419,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
             self.wakeObserver = nil
+        }
+        if let screenWakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(screenWakeObserver)
+            self.screenWakeObserver = nil
         }
         // 注意：**不**清空待发通知 —— 退出后系统仍会按时投递已排好的提醒。
     }
@@ -1169,6 +1206,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 自检用：课表窗口当前的原点（屏幕坐标）。
     var testWindowOrigin: NSPoint { window?.frame.origin ?? .zero }
 
+    /// 自检用：模拟「屏幕 / 系统唤醒」（2026-11-11）。
+    ///
+    /// 用户原话：「刚打开显示屏的时候正在上课但是课表上没有显示我正在上课
+    /// 而且时间晚了 1 分钟」——
+    /// 根因是屏幕睡着时 WebKit 挂起了网页的定时器，醒来后卡片顶部
+    /// 停在睡着前那一帧。唤醒时必须主动重画一次。
+    ///
+    /// 自检里用这条路径验证「唤醒 → 卡片顶部被重画」。
+    func testSimulateWake() {
+        handleSystemWake()
+    }
+
+    /// 自检用：唤醒这条路径被调用过几次。
+    private(set) var testWakeCount = 0
+
     /// 自检用：日期覆盖层的状态。
     var testDayPanelState: (open: Bool, day: Int?) {
         dayPanel?.testState ?? (false, nil)
@@ -1349,6 +1401,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             webRenderer?.setTextInputMode(false)
         case "panelRect":
             handleWebPanelRect(payload)
+        case "panelTrace":
+            // 诊断（`DT_FLICKER_DIAG=1`）：网页每真正重建一次覆盖层就报一条。
+            // 用户报「点完成之后一直闪」——这里能看出是谁在驱动重画。
+            if let d = payload as? [String: Any] {
+                DiagLog.info("覆盖层重建 n=\(d["n"] ?? "?") day=\(d["day"] ?? "?") "
+                             + "待办=\(d["todos"] ?? "?") 卡片=\(d["cards"] ?? "?") "
+                             + "pending=\(d["pending"] ?? "") "
+                             + "变了=\(d["changed"] ?? "(首次)")")
+            }
+        case "panelLook":
+            // 诊断：覆盖层的 class / 高度 / 实心区高度 / 透明度 / 滚动位置变了。
+            if let d = payload as? [String: Any] {
+                DiagLog.info("覆盖层外观 \(d["look"] ?? "")")
+            }
         case "pinToggle":
             // 网页里图钉被点到（视觉和点击都在网页层，原生只切状态）。
             //
@@ -1753,6 +1819,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openSettings() {
+        // ⚠️ **打开设置前先把展开的日期覆盖层收回去**（2026-11-11 用户要求）。
+        //
+        // 用户原话：「点开了设置之后展开的日历面板自动收回去」。
+        // 设置面板弹在卡片中心，覆盖层还展开在那一列上 —— 两者叠在一起。
+        //
+        // 原生把 `currentDay` 清掉并推一版 `dayPanelOpen: false`，
+        // 网页收到后自己播 400ms 收起动画（`Timetable.js` 里已有这条处理）。
+        if let state = dayPanel?.testState, state.open, let day = state.day {
+            dayPanel?.close(day: day)
+        }
         reloadData()
         refreshCard()
         // 面板以**课表卡片**为中心（不是鼠标位置）—— 弹在屏幕角落会跟课表脱节。
@@ -2791,6 +2867,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         webPinImagesSent = true
         renderer.setPinImages(hollow: hollow, solid: solid)
         renderer.setPinned(isPinned)
+    }
+
+    /// 睡醒 / 屏幕唤醒后的统一处理。
+    ///
+    /// 两条通知都走这里（`didWake` = 系统睡眠，`screensDidWake` = 只是屏幕关了）：
+    ///
+    /// 1. 睡过了午夜 → 换日期（天气 / 今日摘要跟着换）；
+    /// 2. 补排上课提醒；
+    /// 3. **卡片顶部立刻重画**（时钟 / 状态条）——
+    ///    屏幕睡着时 WebKit 挂起了网页的定时器，原生 `Timer` 也停，
+    ///    醒来后两边都要等下一个 10 秒档才恢复；这中间卡片显示的是
+    ///    **睡着前那一帧的旧值**（时间落后、正在上课没显示）。
+    ///
+    /// - Parameter forceCard: 是否强制重画卡片（自检里用来单测这条路径）。
+    func handleSystemWake(forceCard: Bool = true) {
+        testWakeCount += 1
+        // 睡过了午夜：唤醒后立刻对一次日期（天气 / 今日摘要跟着换）。
+        dayPanel?.handleDayChange()
+        refreshReminderSchedule()
+        guard forceCard else { return }
+        // 主动叫醒一次（原生重画 + 网页就地刷新时钟）。
+        forceRefreshCard()
+        // 唤醒后网页的定时器可能还要一会儿才真正恢复 ——
+        // 再补一刀（延后一小会儿），确保卡片一定显示的是**当前**时间。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.forceRefreshCard()
+        }
+    }
+
+    /// **强制**刷新一次卡片（不管「这一分钟推过了没有」）。
+    ///
+    /// ⚠️ **为什么需要**（2026-11-11 修「刚打开显示屏时，时间晚了 1 分钟、
+    /// 也没显示『正在上课』」）：
+    /// 显示器睡着时，**WebKit 会挂起网页的定时器**（`setInterval` 不再触发），
+    /// 原生这边的 `Timer` 也会停。醒来后：
+    ///   · 原生的 10 秒定时器要等下一个档才恢复；
+    ///   · 网页的 10 秒定时器同样要等下一个档才恢复。
+    /// 这中间（最长 ~10 秒，实际常常更久）卡片顶部显示的是**睡着前那一帧的旧值**
+    /// —— 时间落后一分钟、状态条还停在「今天没有课」。
+    ///
+    /// 用户「刚打开显示屏」看到的就是那个旧值。
+    /// 所以在唤醒通知里**主动叫醒**一次：原生重画 + 网页就地刷新时钟。
+    func forceRefreshCard() {
+        // 原生卡片（快照模式 A / 原生兜底）：状态里带 `now: Date()`，
+        // 重画一次就是当前的。
+        applyCardState()
+        interaction?.setPinTitle(cardTitle)
+        guard let renderer = webRenderer else { return }
+        // 绕过「按分钟才推一次」那道闸 —— 唤醒时必须立刻推。
+        lastWebMinute = Int(Date().timeIntervalSince1970 / 60)
+        webNeedsRefresh = false
+        renderer.update(stateJSON: webStateJSON())
+        // 网页自己走表的那个 `setInterval` 也叫醒一次 ——
+        // 顶部时钟 / 状态条是它负责的（原生推状态不会重画那两处）。
+        renderer.tickClockNow()
+        if !isLiveMode {
+            // 等网页画完这一帧再取快照，否则拿到的是上一帧
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                renderer.snapshot()
+            }
+        }
     }
 
     func refreshCard() {

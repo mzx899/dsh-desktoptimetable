@@ -207,8 +207,12 @@
     window.__ttLastAnyPost = entry;
     // ⚠️ `panelRect` 是**几何回报**（原生算悬停 / 穿透用），不是用户意图 ——
     // 也写进 `__ttLastPost` 的话，自检里「最后发的意图是什么」全被它顶掉。
+    // `panelTrace` / `panelLook` 同理（2026-11-11 加的诊断探针，只在
+    // `DT_FLICKER_DIAG=1` / 自检里开；写进去会把「右键选删除 → todoDelete」
+    // 这类断言顶成 panelTrace）。
     if (action !== 'textInputFocus' && action !== 'textInputBlur'
-        && action !== 'panelRect') {
+        && action !== 'panelRect' && action !== 'panelTrace'
+        && action !== 'panelLook') {
       window.__ttLastPost = entry;
     }
     try {
@@ -2577,6 +2581,29 @@
     }
   }
 
+  // **键序无关**的 JSON 序列化（只用来做「内容有没有变」的指纹）。
+  //
+  // 原生推来的是 Swift 字典 → JSON 对象的**键顺序不保证稳定**，
+  // 内容相同的两版数据用 `JSON.stringify` 比出来也会「不一样」；
+  // 指纹一判「变了」，面板就整块重建一次（半透明玻璃 → 闪一下）。
+  // 所以：数组按元素、对象按键名排序后序列化。
+  function stableStringify(value) {
+    if (value === null || value === undefined) return String(value);
+    var type = typeof value;
+    if (type !== 'object') return JSON.stringify(value);
+    if (Object.prototype.toString.call(value) === '[object Array]') {
+      var items = [];
+      for (var i = 0; i < value.length; i++) items.push(stableStringify(value[i]));
+      return '[' + items.join(',') + ']';
+    }
+    var keys = Object.keys(value).sort();
+    var parts = [];
+    for (var k = 0; k < keys.length; k++) {
+      parts.push(JSON.stringify(keys[k]) + ':' + stableStringify(value[keys[k]]));
+    }
+    return '{' + parts.join(',') + '}';
+  }
+
   // 只重建内容，不动位置（换列 / 改宽时用）
   function renderPanel() {
     if (DP.day === null) return;
@@ -2617,7 +2644,14 @@
       ? (DP.diaryForm.mode + ':' + (DP.diaryForm.id || ''))
       : 'none';
     var diaryPendingSig = (DP.diaryPending || []).length;
-    var renderKey = JSON.stringify([
+    // ⚠️ **必须用「键序无关」的序列化**（2026-11-11 修「点完成之后一直闪」）。
+    //
+    // 原来的 `JSON.stringify` 受**对象键的插入顺序**影响：原生推来的
+    // `dayFestivals` / `festival` 是 Swift 的 `[String: Any]`，每次序列化
+    // 键的顺序可能不同（内容一模一样）—— 于是指纹每次都「变了」，
+    // 每次推送都整块重建面板。真机日志（DT_FLICKER_DIAG=1）实测：
+    // 打开一列之后 4 秒内重建了 **15 次**，每推一次闪一下。
+    var renderKey = stableStringify([
       DP.day, data, pendingSig, DP.adding, DP.addError,
       DP.editingTodoKey, DP.editError, pendingEditSig,
       diaryFormSig, diaryPendingSig
@@ -2627,6 +2661,58 @@
       return;
     }
     DP.renderKey = renderKey;
+    // 自检 / 诊断用：**真正重建**的次数（内容没变时上面已经早退，不计）。
+    // 用户报「点完成之后一直闪」时，靠这条时间线判断是不是被原生反复推送驱动的。
+    if (window.__TT_PANEL_TRACE) {
+      window.__ttRenders = window.__ttRenders || [];
+      window.__ttRenders.push({
+        t: Math.round(performance.now()),
+        day: DP.day,
+        todos: ((data && data.todos) || []).length,
+        pending: pendingSig,
+        cards: body.querySelectorAll('.dpcards > .dpcard').length
+      });
+      if (window.__ttRenders.length > 200) window.__ttRenders.shift();
+      // 打到系统日志（150ms 限流）——用户真机复现时可以事后看时间线。
+      var traceNow = nowMs();
+      if (!window.__ttTraceAt || traceNow - window.__ttTraceAt >= 150) {
+        window.__ttTraceAt = traceNow;
+        // 到底是**哪个字段**变了才触发重建？（诊断用）
+        // 逐顶层 key 用稳定序列化存一份，跟上一版比 —— 日志里直接看 diff。
+        var changedKeys = '';
+        try {
+          var parts = {};
+          var dkeys = Object.keys(data || {});
+          for (var di = 0; di < dkeys.length; di++) {
+            parts[dkeys[di]] = stableStringify(data[dkeys[di]]);
+          }
+          if (window.__ttDataParts) {
+            var diff = [];
+            var allKeys = Object.keys(parts);
+            var oldKeys = Object.keys(window.__ttDataParts);
+            for (var oi = 0; oi < oldKeys.length; oi++) {
+              if (allKeys.indexOf(oldKeys[oi]) < 0) allKeys.push(oldKeys[oi]);
+            }
+            for (var ai = 0; ai < allKeys.length; ai++) {
+              var kk = allKeys[ai];
+              if (parts[kk] !== window.__ttDataParts[kk]) diff.push(kk);
+            }
+            changedKeys = diff.join(',');
+          }
+          window.__ttDataParts = parts;
+        } catch (e) { changedKeys = 'err'; }
+        try {
+          post('panelTrace', {
+            n: window.__ttRenders.length,
+            day: DP.day,
+            todos: ((data && data.todos) || []).length,
+            cards: body.querySelectorAll('.dpcards > .dpcard').length,
+            pending: pendingSig,
+            changed: changedKeys
+          });
+        } catch (e) {}
+      }
+    }
 
     // ⚠️ **宽态的滚动位置要保住** ——
     // 内容重建会把 .dpbody 的子节点全换掉，滚动位置随之归零。
@@ -3852,7 +3938,17 @@
 
     var curBlock = -1;
     for (var i = 0; i < 5; i++) {
-      if (cur >= toMin(blockStart(i)) && cur <= toMin(blockEnd(i))) { curBlock = i; break; }
+      // ⚠️ **右开区间** `[开始, 结束)`（2026-11-11 修「课已经结束了还显示正在上课」）。
+      //
+      // 以前是 `cur <= 结束`（闭区间）→ 到了**下课那一刻**（比如 17:40）
+      // 整整一分钟都还显示「正在上课 · 剩 0 分钟」。
+      // 用户看到的是「课都上完了，状态条还挂着『正在上课』」——
+      // 因为下课到下一节课之间**没有下一节**，状态条那一分钟特别显眼。
+      //
+      // 改成右开区间：17:40 起就不再算「正在上课」，直接显示「今日课程已结束」。
+      // ⚠️ 两处（`render` / `liveContext`）+ 原生 `TimetableState.currentBlock`
+      // **必须一致**，否则原生推的和网页自己算的对不上。
+      if (cur >= toMin(blockStart(i)) && cur < toMin(blockEnd(i))) { curBlock = i; break; }
     }
     var curCell = curBlock >= 0 ? map[today + '-' + curBlock] : null;
     var curCourse = (curCell && runsCurWeek(curCell)) ? curCell : null;
@@ -3894,6 +3990,34 @@
   // 数据本身没变 → `tableStateKey` 判成「没变」→ 走轻量路径，顶部不重画；
   // 于是时间冻在**上一次真正重绘**的时候（翻周 / 改设置才跳一下）。
   // 现在网页自己每 10 秒把文字就地换一遍，和原生推不推无关。
+  // 上下课边界的**精确定时器**（2026-11-11 用户要求「不点击也要立刻更新」）。
+  //
+  // 平时 10 秒轮询一次就够省电；但「上课开始 / 下课」那一刻状态条必须立刻变
+  //（用户原话：如果现在课堂开始了，时间立刻就要更新，正在上的课也马上就要更新）。
+  // 所以每次刷新时顺手算出**下一个边界**离现在多少毫秒，单独定一个 setTimeout，
+  // 到点立刻再刷一次并重排 —— 平时零额外开销，边界处几乎不晚。
+  var boundaryTimer = null;
+  function scheduleBoundaryTick(now) {
+    if (boundaryTimer) { clearTimeout(boundaryTimer); boundaryTimer = null; }
+    if (!S) return;
+    var cur = now.getHours() * 60 + now.getMinutes() + now.getSeconds() / 60;
+    var next = null;
+    for (var i = 0; i < 5; i++) {
+      var s = toMin(blockStart(i));
+      var e = toMin(blockEnd(i));
+      if (s > cur && (next === null || s < next)) next = s;
+      if (e > cur && (next === null || e < next)) next = e;
+    }
+    if (next === null) return;
+    var delay = Math.ceil((next - cur) * 60000) + 300;
+    // 边界太远（> 1 小时）就不必精确等 —— 10 秒轮询完全够。
+    if (delay <= 0 || delay > 3600000) return;
+    boundaryTimer = setTimeout(function () {
+      boundaryTimer = null;
+      updateLiveTexts();
+    }, delay);
+  }
+
   function updateLiveTexts() {
     if (!S) return;
     var now = new Date();
@@ -3921,6 +4045,8 @@
       if (stxt) stxt.textContent = tick.statusText;
       if (smeta) smeta.textContent = tick.statusMeta;
     }
+    // 每次刷完都按「现在」重排下一个上下课边界（见 scheduleBoundaryTick）。
+    scheduleBoundaryTick(now);
   }
 
   // ---- 渲染 ----
@@ -4023,7 +4149,17 @@
 
     var curBlock = -1;
     for (var i = 0; i < 5; i++) {
-      if (cur >= toMin(blockStart(i)) && cur <= toMin(blockEnd(i))) { curBlock = i; break; }
+      // ⚠️ **右开区间** `[开始, 结束)`（2026-11-11 修「课已经结束了还显示正在上课」）。
+      //
+      // 以前是 `cur <= 结束`（闭区间）→ 到了**下课那一刻**（比如 17:40）
+      // 整整一分钟都还显示「正在上课 · 剩 0 分钟」。
+      // 用户看到的是「课都上完了，状态条还挂着『正在上课』」——
+      // 因为下课到下一节课之间**没有下一节**，状态条那一分钟特别显眼。
+      //
+      // 改成右开区间：17:40 起就不再算「正在上课」，直接显示「今日课程已结束」。
+      // ⚠️ 两处（`render` / `liveContext`）+ 原生 `TimetableState.currentBlock`
+      // **必须一致**，否则原生推的和网页自己算的对不上。
+      if (cur >= toMin(blockStart(i)) && cur < toMin(blockEnd(i))) { curBlock = i; break; }
     }
     var curCell = curBlock >= 0 ? map[today + '-' + curBlock] : null;
     var curCourse = (curCell && runsCurWeek(curCell)) ? curCell : null;
@@ -4991,6 +5127,41 @@
   window.__ttDiagMove = function (x, y) { onPointerMove({ clientX: x, clientY: y }); };
   window.__ttDiagClick = function (day) { onHeaderPick(day); };
 
+  // 诊断用：原生在 `DT_FLICKER_DIAG=1` 时调一次，打开「覆盖层重建 / 外观变化」探针。
+  //
+  // 为什么要有：用户报「点完成之后一直闪」，但在自检（无合成器）里复现不出来。
+  // 打开后每次**真正重建**（指纹变了）和每次面板外观变化都会 post 一条，
+  // 原生写进统一日志（`DiagLog`），事后用
+  // `log show --predicate 'subsystem == "com.desktoptimetable.diag"'` 看时间线，
+  // 就能分清「是原生反复推送」还是「网页自己重画」。
+  window.__ttEnablePanelTrace = function () {
+    window.__TT_PANEL_TRACE = true;
+    window.__ttRenders = window.__ttRenders || [];
+    window.__ttTraceAt = 0;
+    window.__ttLookAt = 0;
+    var d = document.querySelector('.daypanel');
+    if (d && !window.__ttLookObs) {
+      var lastLook = '';
+      window.__ttLookObs = new MutationObserver(function () {
+        var el = document.querySelector('.daypanel');
+        if (!el) return;
+        var b = document.querySelector('.dpbody');
+        var look = el.className + ' | h=' + Math.round(el.getBoundingClientRect().height)
+          + ' | bodyH=' + (el.style.getPropertyValue('--dp-body-h') || '')
+          + ' | op=' + getComputedStyle(el).opacity
+          + ' | scroll=' + (b ? Math.round(b.scrollTop) : 0);
+        if (look === lastLook) return;
+        lastLook = look;
+        var now = nowMs();
+        if (now - window.__ttLookAt < 150) return;
+        window.__ttLookAt = now;
+        try { post('panelLook', { look: look }); } catch (e) {}
+      });
+      window.__ttLookObs.observe(d, { attributes: true, attributeFilter: ['class', 'style'] });
+    }
+    return true;
+  };
+
   // 原生 / 自检查询：「添加待办」的输入区**开着没有**。
   //
   // ⚠️ **必须看可见性，不能只看元素在不在**（2026-11-09 起）。
@@ -5182,6 +5353,27 @@
     // 自检入口：立刻刷新一次顶部文字，并标记定时器已装上。
     window.__ttUpdateClock = updateLiveTexts;
     window.__ttClockTimer = true;
+    // 自检入口：算「当天第 N 分钟」时状态条会显示什么（2026-11-11）。
+    //
+    // 用来验**下课边界**：判定「正在上课」必须是**右开区间** `[开始, 结束)` ——
+    // 到了下课那一刻（17:40）就该是「今日课程已结束」，
+    // 不能还挂着「正在上课 · 剩 0 分钟」。
+    // ⚠️ 用「当天第 N 分钟」而不是改 `Date` —— 改 `Date` 会连 `render()` 一起带偏，
+    // 测出来的东西不可信。
+    window.__ttStatusAtMinute = function (min) {
+      if (!S) return null;
+      // 造一个**真的** Date（只把时分改掉）——
+      // liveTickerTexts 还会读 getMonth / getDate，假对象会抛 TypeError。
+      var d = new Date();
+      d.setHours(Math.floor(min / 60), min % 60, 0, 0);
+      var ctx = liveContext(d);
+      var t = liveTickerTexts(d, ctx);
+      return t.statusText;
+    };
+    // 自检入口：当前作息（`S` 是模块内变量，外面拿不到）。
+    window.__ttPeriods = function () {
+      return (S && S.periods) ? S.periods : [];
+    };
   } catch (e) {
     window.__ttBootError = (window.__ttBootError || '') + ' tail: ' + String((e && e.stack) || e);
   }

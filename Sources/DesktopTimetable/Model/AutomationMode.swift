@@ -36,6 +36,17 @@ enum AutomationMode {
         // 不登记的话它会以非自动化模式运行 → `reloadData()` 走到
         // `refreshReminderSchedule()` → 清掉用户真实排好的上课提醒。
         "--verify-settings-first-open",
+        // 唤醒后卡片顶部（时钟 / 状态条）立刻刷新的回归自检（2026-11-11）。
+        // 不登记的话它会以非自动化模式运行 → `reloadData()` 走到
+        // `refreshReminderSchedule()` → 清掉用户真实排好的上课提醒。
+        "--verify-wake-refresh",
+        // 「点完成之后一直闪」的回归自检（2026-11-11）。
+        // 不登记的话它会以非自动化模式运行 → `reloadData()` 走到
+        // `refreshReminderSchedule()` → 清掉用户真实排好的上课提醒；
+        // 而且 `DayPanelController` 会拿真实 EventKit（本自检会**写回**完成状态）。
+        "--verify-complete-flicker",
+        // 打开设置时收起日期覆盖层的回归自检（2026-11-11）。
+        "--verify-settings-closes-panel",
         "--shot-panel-mid",
         // 设置面板出图入口。不登记的话它会以**非自动化模式**运行：
         // `reloadData()` 走到 `refreshReminderSchedule()` → 清掉用户真实排好的提醒。

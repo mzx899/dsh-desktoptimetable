@@ -92,6 +92,11 @@ final class WebCardRenderer: NSObject {
 
     /// 调试用的悬停状态探测定时器
     private var hoverProbeTimer: Timer?
+    /// 调试用的**时钟 / 状态条**探测定时器（`DT_CLOCK_PROBE=1`）。
+    ///
+    /// 排查「卡片顶部的时间不实时」这类问题时用它：每隔几秒把网页里的
+    /// 时钟、状态条文字打出来，能一眼看出网页的定时器有没有在跑。
+    private var clockProbeTimer: Timer?
 
     /// 网页发来的用户意图：("week", -1) / ("toggleAllWeeks", nil) / ("openSettings", nil) / ("weekCurrent", nil)
     var onIntent: ((String, Any?) -> Void)?
@@ -212,6 +217,22 @@ final class WebCardRenderer: NSObject {
             }
             self?.reportLiveCardFrame()
         }
+    }
+
+    /// 让网页**立刻**刷新一次顶部时钟 / 日期 / 状态条（不等它自己的定时器）。
+    ///
+    /// ⚠️ **为什么需要**（2026-11-11 修「刚打开显示屏时，时间晚了 1 分钟、
+    /// 也没显示『正在上课』」）：
+    /// 网页靠 `setInterval(updateLiveTexts, 10000)` 自己走表。
+    /// 但**显示器睡着时 WebKit 会挂起页面的定时器** —— 醒来后那个
+    /// `setInterval` 要等下一个 10 秒档才恢复，中途这段时间里
+    /// 卡片顶部的时钟 / 状态条是**睡着前那一帧的旧值**。
+    /// 用户「刚打开显示屏」看到的就是那个旧值（时间落后、正在上课没显示）。
+    ///
+    /// 这里在唤醒时主动叫醒它一次 —— 纯显示刷新，不重建 DOM。
+    func tickClockNow() {
+        guard ready else { return }
+        webView.evaluateJavaScript("if (window.__ttUpdateClock) window.__ttUpdateClock();")
     }
 
     /// 实验模式 B：网页里 `.card` 的**布局矩形**（CSS px，原点在网页左上角，
@@ -882,6 +903,34 @@ final class WebCardRenderer: NSObject {
         }
     }
 
+    /// 调试用（DT_CLOCK_PROBE=1）：每隔几秒把网页里的时钟 / 状态条文字打出来，
+    /// 用来确认「网页自己走表」的定时器到底有没有在跑。
+    func startClockProbe() {
+        let js = """
+        (function () {
+          var tn = document.querySelector('.clock .tnum');
+          var st = document.querySelector('.status .stxt');
+          var sm = document.querySelector('.status .smeta');
+          return 'clock=' + (tn ? tn.textContent.trim() : 'null')
+            + ' | stxt=' + (st ? st.textContent.trim() : 'null')
+            + ' | smeta=' + (sm ? sm.textContent.trim() : 'null')
+            + ' | timer=' + (window.__ttClockTimer === true)
+            + ' | bootErr=' + (window.__ttBootError || 'none')
+            + ' | hidden=' + document.hidden
+            + ' | vis=' + document.visibilityState
+            + ' | now=' + new Date().toTimeString().slice(0,5);
+        })();
+        """
+        let timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.webView.evaluateJavaScript(js) { value, _ in
+                NSLog("[TT-CLOCK-PROBE] %@", String(describing: value))
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        clockProbeTimer = timer
+    }
+
     /// 调试用（DT_LIVE_PROBE=1）：定期把网页的悬停状态打出来，
     /// 用来确认真实鼠标移动时网页到底收到了什么。
     func startHoverProbe() {
@@ -948,6 +997,11 @@ extension WebCardRenderer: WKNavigationDelegate {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                     self?.probeElements()
                     self?.startHoverProbe()
+                }
+            }
+            if ProcessInfo.processInfo.environment["DT_CLOCK_PROBE"] == "1" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                    self?.startClockProbe()
                 }
             }
             return

@@ -23,13 +23,17 @@ final class DayPanelController {
     /// EventKit 接入层。
     ///
     /// 自动化模式注入 fake（什么都返回空），真实模式才用真的。
-    private let eventStore: EventKitStoreProtocol
+    ///
+    /// ⚠️ `var` + `testReplaceStore`（2026-11-11）：自检要复现「真实写回路径」——
+    /// 空实现的 `setReminder` 永远返回失败，走不到「写回成功 → 重取数 →
+    /// 补推」那条分支，于是「点完成之后一直闪」这类问题在自检里复现不出来。
+    private var eventStore: EventKitStoreProtocol
 
     /// 「已完成的提醒事项」的读取 / 筛选 / 分页 / 批量删除状态机。
     ///
     /// 和日期覆盖层共用上面那个 `eventStore` —— 测试注入一个 fake，
     /// 两边都不会碰用户真实的提醒事项。
-    let completedReminders: CompletedRemindersService
+    private(set) var completedReminders: CompletedRemindersService
 
     /// 农历 / 节气 / 节日提供者（农历模块由别的 agent 实现，这里用协议解耦）。
     private let festivalProvider: DayPanelFestivalProvider
@@ -358,18 +362,6 @@ final class DayPanelController {
     /// 「请在设置里选择地区」—— 所以这个值必须随 `festival` 一起推过去。
     private var weatherRegion: String {
         settings.weatherCity.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    /// 请求一次定位授权（用户打开「显示天气」时调）。
-    ///
-    /// 自动化模式**什么都不做** —— 不能弹系统权限框。
-    func requestLocationAccess() {
-        guard !AutomationMode.isCurrentProcessAutomation else { return }
-        guard let provider = weatherProvider as? OpenMeteoWeatherProvider else { return }
-        provider.requestCurrentLocation { _ in
-            // 拿到位置就顺手把天气取回来（省得用户再点一次）。
-            provider.fetchWeather { _ in }
-        }
     }
 
     /// 请求授权（日历 + 提醒事项）。
@@ -1309,7 +1301,23 @@ final class DayPanelController {
         let date = dayDate(day) ?? Date()
         content.day = day
         content.isToday = (day == todayIndex)
-        content.todoDigest = nil   // 每次换天 / 重载都重新算
+        // ⚠️ **只有换天 / 换列才清空「今天 N 条待处理 · 逾期 M 条」摘要**（2026-11-11 修）。
+        //
+        // 用户报「点完成之后一直闪」，真机日志（`DT_FLICKER_DIAG=1`）显示：
+        // 每刷新一次待办，`.dpcards` 的卡片数就在 **6 ↔ 7** 之间跳 ——
+        // 那张 6/7 之间的卡片就是**黄色的摘要卡**（`.dpdigest`，琥珀色文字）。
+        //
+        // 根因：`loadContent` 不分青红皂白把 `content.todoDigest` 清成 nil →
+        // 立刻推一版「没有摘要」的状态（摘要卡消失、下面的卡片整体上移）；
+        // 0.35 秒后 `refreshTodoDigest` 的异步回包才把摘要补回来 →
+        // 又推一版（摘要卡出现、整体下移）。**一次刷新 = 上下跳两下**，
+        // 用户看到的就是「黄色那张东西一直在闪」。
+        //
+        // 同一天刷新（完成 / 添加 / 删除 / 外部变化）时摘要本来就该保留旧值，
+        // 等新值算出来**直接替换**，不需要先消失一下。
+        if resetImmediately {
+            content.todoDigest = nil   // 换天 / 换列：上一天的「今天」口径不能再留着
+        }
         // 「显示天气」开关是全局设置 —— 网页用它区分「暂不显示」和「暂无数据」。
         content.weatherEnabled = settings.weatherEnabled
         // 地区（空串 = 还没选 → 网页提示「请在设置里选择地区」）。
@@ -1771,23 +1779,19 @@ final class DayPanelController {
                 self.fetchForecast(at: coord)
             }
         } else {
-            fetchForecastAtCurrentLocation()
-        }
-    }
-
-    /// 按**当前定位**取预报。
-    private func fetchForecastAtCurrentLocation() {
-        guard let provider = weatherProvider else {
+            // ⚠️ **没选地区就不再请求系统定位**（2026-11-11 用户要求）。
+            //
+            // 用户原话：「我在设置里面打开了显示天气的选项，还是会跳出来
+            // 桌面课表想使用你当前的位置的请求授权的窗口」。
+            //
+            // 以前这里走「按当前定位取预报」→ `requestCurrentLocation`
+            // → 第一次必定弹系统定位授权框；而这个 app 是 ad-hoc 签名，
+            // 系统对定位请求会**静默拒绝**（详见 CHANGELOG 里的实测结论），
+            // 所以弹框除了吓人之外一点用都没有。
+            //
+            // 现在：没选地区 → 什么都不请求，面板显示「请在设置里选择地区」。
+            DiagLog.info("天气：没选地区 → 不请求定位（面板显示「请在设置里选择地区」）")
             finishWeatherRequest([:])
-            return
-        }
-        provider.requestCurrentLocation { [weak self] coord in
-            guard let self else { return }
-            guard let coord else {
-                self.finishWeatherRequest([:])
-                return
-            }
-            self.fetchForecast(at: coord)
         }
     }
 
@@ -2074,6 +2078,24 @@ final class DayPanelController {
         (currentDay != nil, currentDay)
     }
 
+    /// 自检用：换掉 EventKit 接入层（**只能在自动化模式里用**）。
+    ///
+    /// 空实现（`EmptyEventKitStore`）的 `setReminder` 永远失败 →
+    /// 「点完成」只会走「写回失败、重新推送」那条分支；真实环境走的是
+    /// 「写回成功 → 重取数（可能是旧快照）→ 补推」。
+    /// 要复现用户报的「点完成之后一直闪」，必须换成会**真的写进数据**的
+    /// `FakeEventKitStore`（`appliesToggle` / `toggleDelay` / `simulateStaleReads`）。
+    ///
+    /// ⚠️ 只在自动化模式生效：真实进程里调用它会把用户数据源换掉。
+    func testReplaceStore(_ store: EventKitStoreProtocol) {
+        guard AutomationMode.isCurrentProcessAutomation else { return }
+        eventStore = store
+        completedReminders = CompletedRemindersService(store: store)
+    }
+
+    /// 自检用：第 `day` 列对应的是哪一天（`dayDate` 私有）。
+    func testDate(day: Int) -> Date? { dayDate(day) }
+
     /// 自检用：表头标记。
     var testFlags: [Int: DayPanelFlags] { flags }
 
@@ -2227,7 +2249,21 @@ final class FakeEventKitStore: EventKitStoreProtocol {
     /// 自检注入：逾期未处理条数（`pendingReminders(before:)` 直接回这个）。
     var overduePendingCount = 0
 
+    /// `pendingReminders`（「逾期几条」）的回调延迟（秒）。
+    ///
+    /// ⚠️ 真实 EventKit 跨进程查询要几十毫秒；同步回调时
+    /// 「摘要卡先消失、0.35 秒后再回来」这两版推送会挤在**同一帧**里，
+    /// 网页端根本采样不到中间态（自检就成了假绿）。
+    var overdueDelay: TimeInterval = 0
+
     func pendingReminders(before date: Date, completion: @escaping (Int) -> Void) {
+        if overdueDelay > 0 {
+            let value = overduePendingCount
+            DispatchQueue.main.asyncAfter(deadline: .now() + overdueDelay) {
+                completion(value)
+            }
+            return
+        }
         completion(overduePendingCount)
     }
 

@@ -122,6 +122,15 @@ final class OpenMeteoWeatherProvider: NSObject, DayPanelWeatherProvider {
     /// 授权状态（`nil` = 还没问过）。
     private(set) var authorizationStatus: CLAuthorizationStatus = .notDetermined
 
+    /// 是否允许真的请求系统定位。
+    ///
+    /// 2026-11-11：用户要求天气只走「设置里手动选地区」，
+    /// 任何路径都不要再弹「想使用你当前的位置」授权框。
+    /// 只有诊断探针（`DT_WEATHER_PROBE=1`）才允许真的定位。
+    private static var allowsSystemLocation: Bool {
+        ProcessInfo.processInfo.environment["DT_WEATHER_PROBE"] == "1"
+    }
+
     override init() {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = Self.requestTimeout
@@ -213,6 +222,17 @@ final class OpenMeteoWeatherProvider: NSObject, DayPanelWeatherProvider {
     ///     没有兜底的话 `pendingCompletions` 永远挂着、天气永远不来。
     ///     现在加 **10 秒超时**，超时后按「拿不到位置」收尾。
     func requestCurrentLocation(_ completion: @escaping (CLLocationCoordinate2D?) -> Void) {
+        // ⚠️ **默认不请求系统定位**（2026-11-11 用户要求）。
+        //
+        // 用户原话：「我在设置里面打开了显示天气的选项，还是会跳出来
+        // 桌面课表想使用你当前的位置的请求授权的窗口」。
+        // 天气只用「设置里手动选地区」的坐标，任何路径都不该再弹定位授权框。
+        // 只有诊断探针（`DT_WEATHER_PROBE=1`）才允许真的定位。
+        guard Self.allowsSystemLocation else {
+            DiagLog.info("天气：不请求系统定位（天气只用手填地区）")
+            completion(nil)
+            return
+        }
         guard let m = locationManager else {
             // 自动化模式：直接给 nil（不碰系统）。
             DiagLog.info("天气：自动化模式，不请求位置")
@@ -825,8 +845,14 @@ final class FakeWeatherProvider: DayPanelWeatherProvider {
     /// 城市查询返回的坐标（自检用；nil = 查不到）。
     var cityCoordinate: CLLocationCoordinate2D? = CLLocationCoordinate2D(latitude: 39.9354, longitude: 119.6005)
 
+    /// 地名查询次数（自检用）。
+    ///
+    /// ⚠️ 不并进 `forecastRequestCount`：那一个是「真的取了一次预报」的次数，
+    /// 把地名查询也算进去会让「扫多列只发一次请求」这类断言失准（2026-11-11）。
+    private(set) var resolveCityCount = 0
+
     func resolveCity(_ name: String, completion: @escaping (CLLocationCoordinate2D?) -> Void) {
-        forecastRequestCount += 1
+        resolveCityCount += 1
         completion(cityCoordinate)
     }
 
