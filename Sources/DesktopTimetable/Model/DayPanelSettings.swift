@@ -34,17 +34,32 @@ struct DayPanelSettings: Equatable {
     /// 两样都是敏感操作，必须让用户自己开。
     ///
     /// 开着但拿不到位置 / 网络失败 → 网页**隐藏整行**，
-    /// 绝不显示假数据。
+    /// 开着但拿不到位置 / 网络失败 → 网页显示**「暂无数据」**，
     var weatherEnabled: Bool = false
+
+    /// 天气用的**城市名**（空串 = 用系统定位）。
+    ///
+    /// ⚠️ **这是定位的降级方案**（2026-11 加）：
+    ///
+    /// `LSUIElement` 后台程序在 macOS 上**经常弹不出定位授权框**
+    /// （`requestWhenInUseAuthorization()` 静默失败、状态卡在 notDetermined），
+    /// 于是天气永远拿不到。用户要求「有数据的显示，没数据显示暂无数据」，
+    /// 前提是**能拿到数据** —— 所以给一条不需要定位权限的路：
+    /// 填了城市名 → 用 Open-Meteo 的地名搜索拿经纬度（不碰定位）。
+    ///
+    /// 留空 → 仍然尝试系统定位（用户已授权时最准）。
+    var weatherCity: String = ""
 
     init(enabled: Bool = false,
          listIdentifier: String = "",
          listTitle: String = "桌面课表",
-         weatherEnabled: Bool = false) {
+         weatherEnabled: Bool = false,
+         weatherCity: String = "") {
         self.enabled = enabled
         self.listIdentifier = listIdentifier
         self.listTitle = listTitle
         self.weatherEnabled = weatherEnabled
+        self.weatherCity = weatherCity
     }
 
     /// 从 `settings.json` 的字典读（缺字段 / 类型非法都退回默认值）。
@@ -53,6 +68,7 @@ struct DayPanelSettings: Equatable {
         if let s = obj["listIdentifier"] as? String { listIdentifier = s }
         if let s = obj["listTitle"] as? String, !s.isEmpty { listTitle = s }
         if let b = StrictJSONValue.bool(obj["weatherEnabled"]) { weatherEnabled = b }
+        if let c = obj["weatherCity"] as? String { weatherCity = c }
     }
 
     /// 写进 `settings.json` 的字典。
@@ -60,7 +76,8 @@ struct DayPanelSettings: Equatable {
         ["enabled": enabled,
          "listIdentifier": listIdentifier,
          "listTitle": listTitle,
-         "weatherEnabled": weatherEnabled]
+         "weatherEnabled": weatherEnabled,
+         "weatherCity": weatherCity]
     }
 
     /// 默认清单名（第一次写入时自动建这个）。

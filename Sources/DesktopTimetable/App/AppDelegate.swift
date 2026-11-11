@@ -1,4 +1,5 @@
 import AppKit
+import CoreLocation
 import UniformTypeIdentifiers
 import UserNotifications
 
@@ -246,11 +247,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         installCancelEditingObserver()
         // 弹窗（设置面板 / 对话框 / 菜单）统一以**课表卡片中心**为锚点。
-        WindowAnchor.provider = { [weak self] in
-            guard let self, let window = self.window else { return .zero }
-            let r = window.convertToScreen(TimetableLayout.cardRect)
-            return NSPoint(x: r.midX, y: r.midY)
-        }
+        installWindowAnchor()
         // 焦点自检：只做最小准备。
         //
         // 不能走完整启动流程 —— 完整流程会建菜单栏图标、装全局鼠标监听、
@@ -279,6 +276,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mark("建设置控制器后")
         installHoverMonitor()
         startRefreshTimer()
+        // ⚠️ 诊断开关：`DT_WEATHER_PROBE=1` → 启动后自动走一遍**真实**天气链路
+        // （真定位 + 真网络），把坐标和结果打进统一日志。
+        // 用来回答「授权给了、坐标拿到了，天气为什么还是没有」这类问题。
+        // ⚠️ 诊断开关：`DT_OPEN_DAY=3` → 启动后自动打开第 3 列的覆盖层
+        // （自检 / 出图用，避免依赖鼠标点击）。
+        if let dayStr = ProcessInfo.processInfo.environment["DT_OPEN_DAY"],
+           let day = Int(dayStr) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                self?.dayPanel?.open(day: day)
+            }
+        }
+        // 排查用：`DT_OPEN_SETTINGS=1` → 启动 1.5 秒后自动开一次设置面板，
+        // 再看第 2 次是不是落在同一处（复现「第一次开在左下角」）。
+        if ProcessInfo.processInfo.environment["DT_OPEN_SETTINGS"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.openSettings()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                    self?.settingsController.closeForTest()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                        self?.openSettings()
+                    }
+                }
+            }
+        }
+        // 前台 App 变了 → 我们的设置 / 弹窗跟着抬起或放下（2026-11-10）。
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil, queue: .main
+        ) { _ in
+            WindowLevelPolicy.syncWithFrontmostApp()
+        }
+        WindowLevelPolicy.syncWithFrontmostApp()
+        if ProcessInfo.processInfo.environment["DT_WEATHER_PROBE"] == "1" {
+            // ⚠️ **必须用 `open` 启动**（走 LaunchServices，拿到 bundle id → TCC 才认）。
+            // 直接跑二进制的话，系统认为「你还没授权」，探针必然拿不到坐标。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                self?.runWeatherProbe()
+            }
+        }
         // 清理上次遗留的测试通知（`dt.test.*`）。
         cleanupLeftoverTestNotifications()
         // 前台也要显示横幅 / 声音（默认前台不显示，用户会以为通知没来）。
@@ -288,6 +324,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 睡眠唤醒后补足 14 天窗口 —— 睡一觉醒来，窗口可能已经空了。
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+                // 睡过了午夜：唤醒后立刻对一次日期（天气 / 今日摘要跟着换）。
+                self?.dayPanel?.handleDayChange()
                 self?.refreshReminderSchedule()
             }
 
@@ -897,11 +935,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
            ProcessInfo.processInfo.environment["DT_FOCUS_REPORT"] != nil {
             panelSettings.enabled = true
         }
+        // ⚠️ **天气数据源必须在这里注入**（2026-11 修「天气永远没有数据」）。
+        //
+        // 以前生产路径没传 `weatherProvider:` → `DayPanelController.loadWeather`
+        // 直接 return → 设置里开着「显示天气」也永远拿不到天气。
+        // 自动化模式下 `OpenMeteoWeatherProvider` 不建 `CLLocationManager`，
+        // 所以自检不会弹授权框、也不会联网。
+        let weatherProvider = OpenMeteoWeatherProvider()
         let controller = DayPanelController(
             settings: panelSettings,
-            festivalProvider: DayPanelFestivalProviderFactory.make(),
+            festivalProvider: DayPanelFestivalProviderFactory.make(
+                weatherProvider: weatherProvider),
             todayIndex: WeekMath.todayIndex(Date()),
-            baseMonday: monday)
+            baseMonday: monday,
+            weatherProvider: weatherProvider)
         controller.onStateChange = { [weak self] payload in
             self?.pushDayPanelState(payload)
         }
@@ -942,9 +989,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `prepareForRendering`）和重建后的窗口构建都不经过那条路 ——
     /// 面板就退回 `WindowAnchor` 的默认值（屏幕正中），
     /// 用户看到的是「课表拖到左下角，设置面板还在屏幕中间」。
+    /// 规则（2026-11-10 补）：
+    ///   · **从设置面板里弹出来的窗口** → 跟着**设置面板**居中
+    ///     （以前一律跟着课表走：课表折叠时，写日记的窗口会出现在折叠条的中间，很怪）；
+    ///   · 其它情况 → 仍然以**课表卡片中心**为锚点。
     private func installWindowAnchor() {
         WindowAnchor.provider = { [weak self] in
-            guard let self, let window = self.window else { return .zero }
+            guard let self else { return .zero }
+            if let settings = self.settingsController,
+               let w = settings.window, w.isVisible, w.isKeyWindow {
+                return NSPoint(x: w.frame.midX, y: w.frame.midY)
+            }
+            guard let window = self.window else { return .zero }
             let r = window.convertToScreen(TimetableLayout.cardRect)
             return NSPoint(x: r.midX, y: r.midY)
         }
@@ -1222,6 +1278,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 网页只认一个状态入口，多开一条会让两边状态不同步。
     private func pushDayPanelState(_ payload: [String: Any]) {
         guard let renderer = webRenderer else { return }
+        // ⚠️ 诊断：对比 payload 的 dayFestivals 与 webStateObject() 的（查 +1 错位）。
+        if ProcessInfo.processInfo.environment["DT_DEBUG_WEATHER"] == "1" {
+            func desc(_ v: Any?) -> String {
+                guard let dict = v as? [String: Any] else { return "nil" }
+                var parts: [String] = []
+                for k in dict.keys.sorted() {
+                    let one = dict[k] as? [String: Any]
+                    parts.append("\(k)=\(one?["lunar"] as? String ?? "?")")
+                }
+                return parts.joined(separator: " ")
+            }
+            let stateFest = webStateObject()["dayFestivals"]
+            DiagLog.info("天气：payload.dayFestivals = \(desc(payload["dayFestivals"]))")
+            DiagLog.info("天气：webState.dayFestivals = \(desc(stateFest))")
+        }
         // 合并进完整状态里再推 —— 不能只推 dayPanel，
         // 否则网页会把课表状态整个丢掉（课程、学期、周次全没了）。
         var merged = webStateObject()
@@ -1602,6 +1673,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsController.onReminderSettingsChanged = { [weak self] in
             self?.refreshReminderSchedule()
         }
+        // ⚠️ **另接一条「只认课表」的锚点取值器**（2026-11-11 修「第一次打开在左下角」）。
+        //
+        // `WindowAnchor.provider` 里有一条「设置面板是 key 时锚点取设置面板自己中心」
+        // —— 那条是给**面板里弹出来的窗口**用的。
+        // 面板**自己**的落点基准必须是**课表卡片中心**，否则就成了自己跟自己比
+        // （`windowDidBecomeKey` 的兜底恒为 0 → 变成死代码）。
+        //
+        // 接在这里（而不是 `installWindowAnchor`）是因为那里调用时
+        // `settingsController` 还是 nil —— 赋值会被 `?.` 悄悄跳过。
+        settingsController.cardAnchorProvider = { [weak self] in
+            guard let self, let window = self.window else { return nil }
+            let r = window.convertToScreen(TimetableLayout.cardRect)
+            return NSPoint(x: r.midX, y: r.midY)
+        }
         settingsController.installHandlers()
         // ⚠️ **把「日期覆盖层」控制器交给设置面板**（2026-11-08 修）。
         //
@@ -1678,6 +1763,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func closeSettingsForTest() {
         settingsController.closeForTest()
     }
+
+    /// 自检用：当前课表窗口 frame（排查「设置第一次开在左下角」）。
+    var testWindowFrame: NSRect { window?.frame ?? .zero }
+    /// 自检用：当前锚点。
+    var testAnchorPoint: NSPoint { WindowAnchor.provider() }
+    /// 自检用：设置窗口 frame。
+    var testSettingsFrame: NSRect { settingsController?.window?.frame ?? .zero }
 
     // MARK: - 课程详情
 
@@ -2153,6 +2245,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pulseTimer = nil
     }
 
+    /// 天气探针：真跑一次「取位置 → 查天气」，把每一步打进统一日志。
+    ///
+    /// 只在 `DT_WEATHER_PROBE=1` 时调用；**不改任何用户数据**。
+    private func runWeatherProbe() {
+        let provider = OpenMeteoWeatherProvider()
+        DiagLog.info("天气探针：provider 授权状态=\(provider.authorizationStatus.rawValue) 定位服务开=\(CLLocationManager.locationServicesEnabled())")
+        // ⚠️ **有城市名就走城市**（不碰定位）—— 这就是给后台程序准备的退路。
+        let city = appSettings.dayPanel.weatherCity.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !city.isEmpty {
+            provider.resolveCity(city) { coord in
+                guard let coord else {
+                    DiagLog.info("天气探针：城市「\(city)」查不到坐标")
+                    return
+                }
+                DiagLog.info("天气探针：城市「\(city)」→ \(coord.latitude), \(coord.longitude)")
+                provider.fetchForecast(at: coord) { forecast in
+                    for key in forecast.keys.sorted() {
+                        let w = forecast[key]!
+                        DiagLog.info("天气探针：\(key) \(w.text) 现在\(w.temperature.map { String(Int($0.rounded())) } ?? "-")° 最低\(w.min.map { String(Int($0.rounded())) } ?? "-")° 最高\(w.max.map { String(Int($0.rounded())) } ?? "-")°")
+                    }
+                }
+            }
+            return
+        }
+        provider.requestCurrentLocation { coord in
+            guard let coord else {
+                DiagLog.info("天气探针：拿不到坐标（授权状态=\(provider.authorizationStatus.rawValue)）")
+                return
+            }
+            DiagLog.info("天气探针：坐标 \(coord.latitude), \(coord.longitude)")
+            provider.fetchForecast { forecast in
+                if forecast.isEmpty {
+                    DiagLog.info("天气探针：没拿到预报")
+                    return
+                }
+                // 按天打印（今天 / 未来 6 天）。
+                for key in forecast.keys.sorted() {
+                    let w = forecast[key]!
+                    DiagLog.info("天气探针：\(key) \(w.text) 现在\(w.temperature.map { String(Int($0.rounded())) } ?? "-")° 最低\(w.min.map { String(Int($0.rounded())) } ?? "-")° 最高\(w.max.map { String(Int($0.rounded())) } ?? "-")°")
+                }
+            }
+        }
+    }
+
     private func startRefreshTimer() {
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
             guard let self else { return }
@@ -2163,6 +2299,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let today = WeekMath.calendar.startOfDay(for: Date())
             if today != self.lastReminderDay {
                 self.lastReminderDay = today
+                // ⚠️ **日期覆盖层也要跨天**（2026-11）：`todayIndex` 要换一天，
+                // 天气要按新的一天重新取（用户要求「每天过 12 点了就更新」）。
+                // 睡眠唤醒后定时器会补跑，所以这里能兜住「睡过了午夜」。
+                self.dayPanel?.handleDayChange()
                 self.refreshReminderSchedule()
             }
         }

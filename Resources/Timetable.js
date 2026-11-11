@@ -1096,7 +1096,7 @@
           var parsed = parseTodoTimeText(raw);
           if (parsed) {
             setTimeInputs(kind, parsed.hour, parsed.minute);
-            focusTimePart(kind, 'minute');
+            // 同样不跳栏（2026-11-11）：填好两个框就停手，光标留在当前栏。
             return;
           }
           // 输入了「9:」这种半成品：冒号不用真的敲，把 9 留在时框、跳到分框。
@@ -1105,7 +1105,7 @@
             if (beforeColon) {
               input.value = beforeColon;
               setTimeValue(kind, part, beforeColon);
-              focusTimePart(kind, 'minute');
+              // 不自动跳到分框（2026-11-11）。
               return;
             }
           }
@@ -1113,12 +1113,9 @@
         var digits = raw.replace(/\D/g, '').slice(0, 2);
         if (digits !== raw) input.value = digits;
         setTimeValue(kind, part, digits);
-        // 填满两位 → 自动跳到下一个框：
-        //   时 → 分；分 → 时（回到开头继续调）。
-        // 和「课程时间自定义」的手感一致。
-        if (digits.length === 2) {
-          focusTimePart(kind, isHour ? 'minute' : 'hour');
-        }
+        // ⚠️ **不要自动跳框**（2026-11-11 用户要求：填完小时 / 分钟就停在这一栏）。
+        // 以前填满两位会自动跳到另一个框，用户接着输入下一位就串到别的栏去了。
+        // 想换栏请用 ←/→ 或 Tab（那几下是用户主动按的）。
       },
       onkeydown: function (e) {
         e.stopPropagation();
@@ -2404,14 +2401,16 @@
   //   · 有农历 → 一定显示农历（哪怕今天不是任何节日）；
   //   · 连农历都拿不到（原生还没推 / 推错了天）→ 显示占位提示。
   //
-  // ⚠️ **天气 / 宜忌拿不到就整行不显示** ——
-  // 绝不能显示假数据（比如「0°」或编出来的宜忌）。
+  // ⚠️ **天气拿不到不编假数据**（绝不显示「0°」）：
+  //   · 开了「显示天气」→ 显示「暂无数据」；
+  //   · 没开 → 整行不显示。
+  // 宜忌拿不到就整行不显示（那是离线算的，没有「加载失败」这回事）。
   function dpFestivalSection(data) {
     var f = data && data.festival;
     var lunar = '';
     var term = '';
     var names = [];
-    var weather = null;
+    // 天气**不在这一块**了（2026-11-10 用户要求：天气单独做成下面一个板块）。
     var yi = '';
     var ji = '';
     if (f && typeof f === 'object') {
@@ -2420,23 +2419,6 @@
       var list = f.festivals || [];
       for (var i = 0; i < list.length; i++) {
         if (list[i]) names.push(String(list[i]));
-      }
-      // 天气是**可选字段** —— 原生没给 / 没城市 / 请求失败时整个字段是 null。
-      if (f.weather && typeof f.weather === 'object') {
-        var w = f.weather;
-        var desc = w.text ? String(w.text) : '';
-        var temp = w.temperature !== undefined && w.temperature !== null
-          ? String(w.temperature) : '';
-        // 温度显示成「12° / 21°」（最低 / 最高）。
-        var lo = w.min !== undefined && w.min !== null ? String(w.min) : '';
-        var hi = w.max !== undefined && w.max !== null ? String(w.max) : '';
-        var tline = '';
-        if (lo && hi) tline = lo + '° / ' + hi + '°';
-        else if (temp) tline = temp + '°';
-        // 描述和温度都没有 → 天气行**不显示**（不要出现一个空的天气行）。
-        if (desc || tline) {
-          weather = { desc: desc, temp: tline };
-        }
       }
       if (f.yi) yi = String(f.yi);
       if (f.ji) ji = String(f.ji);
@@ -2453,13 +2435,6 @@
     for (var j = 0; j < names.length; j++) {
       body.appendChild(h('span', { class: 'fchip', text: names[j] }));
     }
-    // 天气行（有才显示）。
-    if (weather) {
-      body.appendChild(h('div', { class: 'dpweather' },
-        h('span', { class: 'dpwicon', text: weather.desc ? weatherGlyph(weather.desc) : '·' }),
-        h('span', { class: 'dpwdesc', text: weather.desc }),
-        weather.temp ? h('span', { class: 'dpwtemp', text: weather.temp }) : null));
-    }
     // 宜 / 忌（离线算出来的；拿不到就不显示）。
     if (yi || ji) {
       body.appendChild(h('div', { class: 'dpyiji' },
@@ -2469,6 +2444,66 @@
 
     return [dpCard('detail', dpCardHead('🎊', '今日详情'), body,
                    { nodeKey: 'detail' })];
+  }
+
+  // ---- 天气板块（2026-11-10 独立成一张卡）----
+  //
+  // 用户原话：「把天气和提醒待办事项分开，做成下面独立一个天气板块」。
+  // 所以天气不再塞在「今日详情」里，而是单独一张卡，排在最后。
+  //
+  // 规则：
+  //   · 没开「显示天气」→ **不建卡**（这是设置问题，不是数据缺失）；
+  //   · 有数据 → 带边框的一块：第一行「图标 + 现象」+ 当前温度（**只有当天**），
+  //     第二行「低 x° 高 y°」；
+  //   · 没数据 → 没选地区提示「请在设置里选择地区」，选了地区提示「暂无数据」。
+  function dpWeatherSection(data) {
+    var f = data && data.festival;
+    var weatherEnabled = !!(f && typeof f === 'object' && f.weatherEnabled === true);
+    if (!weatherEnabled) return [];
+    var region = (f && f.region) ? String(f.region) : '';
+    var box = null;
+
+    if (f.weather && typeof f.weather === 'object') {
+      var w = f.weather;
+      var desc = w.text ? String(w.text) : '';
+      // 温度取整（「2°」比「1.8°」好读）。
+      function deg(v) {
+        if (v === undefined || v === null) return '';
+        var n = Math.round(Number(v));
+        return isFinite(n) ? String(n) : '';
+      }
+      var cur = deg(w.temperature);   // 当前温度：**只有今天**才有
+      var lo = deg(w.min);
+      var hi = deg(w.max);
+      if (desc || cur || lo || hi) {
+        var top = [h('span', { class: 'dpwicon',
+                              text: desc ? weatherGlyph(desc) : '·' }),
+                   h('span', { class: 'dpwdesc', text: desc })];
+        if (cur) top.push(h('span', { class: 'dpwnow', text: cur + '°' }));
+        var range = [];
+        if (lo) range.push(h('span', { class: 'dpwlow', text: '低 ' + lo + '°' }));
+        if (hi) range.push(h('span', { class: 'dpwhigh', text: '高 ' + hi + '°' }));
+        box = h('div', { class: 'dpwbox' },
+          h('div', { class: 'dpwtop' }, top),
+          range.length ? h('div', { class: 'dpwrange' }, range) : null);
+      }
+    }
+
+    if (!box) {
+      // 空态：同样装在带边框的块里。
+      // 「请在设置里选择地区」在 ~86pt 的列里会从中间断字（「选/择」），
+      // 所以显式拆成两行：请在设置里 / 选择地区。
+      var lines = region
+        ? [h('span', { class: 'dpwdesc', text: '暂无数据' })]
+        : [h('span', { class: 'dpwdesc', text: '请在设置里' }),
+           h('span', { class: 'dpwdesc', text: '选择地区' })];
+      box = h('div', { class: 'dpwbox dpwbox-empty' },
+        h('div', { class: 'dpwtop dpwtop-col' }, lines));
+    }
+
+    return [dpCard('weather', dpCardHead('🌤', '天气'),
+                   h('div', { class: 'dpcardbody dpweather-body' }, box),
+                   { nodeKey: 'weather' })];
   }
 
   // 天气现象 → 一个简单的小图形（不引图片资源，避免打包体积）。
@@ -2647,10 +2682,12 @@
     var diaryCards = dpDiarySection(data, DP.day);
     var eventCards = dpEventSection(data);
     var detailCards = dpFestivalSection(data);
+    var weatherCards = dpWeatherSection(data);
     for (var ci = 0; ci < todoCards.length; ci++) newCards.push(todoCards[ci]);
     for (var cd = 0; cd < diaryCards.length; cd++) newCards.push(diaryCards[cd]);
     for (var cj = 0; cj < eventCards.length; cj++) newCards.push(eventCards[cj]);
     for (var ck = 0; ck < detailCards.length; ck++) newCards.push(detailCards[ck]);
+    for (var cw = 0; cw < weatherCards.length; cw++) newCards.push(weatherCards[cw]);
     syncCards(cards, newCards);
 
     // 滚动位置还原
@@ -4084,7 +4121,8 @@
           + (headerSelDay === d ? ' sel' : ''),
         'data-day': d,
         style: { gridRow: 1, gridColumn: d + 1 },
-        title: DAYS[d - 1] + ' ' + dayNum,
+        // 2026-11-10：**不要再给表头加 tooltip** —— 表头本来就把「周几 + 几号」写在
+        // 脸上，再弹一个一模一样的「周四 12」纯属噪音（用户截图指出）。
         onclick: (function (dd) { return function () { onHeaderPick(dd); }; })(d)
       },
         h('span', { class: 'hmid' },
@@ -4465,6 +4503,10 @@
 
   // 原生推入状态
   window.ttUpdate = function (json) {
+    // ⚠️ 诊断：把**收到的原始 JSON** 留下来（查 dayFestivals 键错位）。
+    if (typeof json === 'string') {
+      try { window.__ttLastStateJSON = json; } catch (e) {}
+    }
     window.__ttUpdateCalls = (window.__ttUpdateCalls || 0) + 1;
     var next = json;
     if (typeof next === 'string') {
@@ -4563,7 +4605,29 @@
     // ⚠️ **7 天各自的「今日详情」**（2026-11）——
     // 原生一次推 7 天，这里存下来，换列时按 `day` 取，不会串。
     if (next && next.dayFestivals && typeof next.dayFestivals === 'object') {
+      // ⚠️ 诊断：**刚收到时**的键 → 农历（vs 赋值后对比）。
+      {
+        var ks0 = [];
+        for (var k0 in next.dayFestivals) {
+          if (Object.prototype.hasOwnProperty.call(next.dayFestivals, k0)) {
+            ks0.push(k0 + '=' + (next.dayFestivals[k0].lunar || '?'));
+          }
+        }
+        window.__ttDiagFestivals = window.__ttDiagFestivals || [];
+        window.__ttDiagFestivals.push('收到: ' + ks0.join(' '));
+        if (window.__ttDiagFestivals.length > 20) window.__ttDiagFestivals.shift();
+      }
       DP.dayFestivals = next.dayFestivals;
+      // ⚠️ 诊断：网页收到的 dayFestivals 键 → 农历（查键错位）。
+      if (window.__ttDiagFestivals) {
+        var ks = [];
+        for (var kk in DP.dayFestivals) {
+          if (Object.prototype.hasOwnProperty.call(DP.dayFestivals, kk)) {
+            ks.push(kk + '=' + (DP.dayFestivals[kk].lunar || '?'));
+          }
+        }
+        window.__ttDiagFestivals.push(ks.join(' '));
+      }
     }
     // ⚠️ **原生说「面板该关上了」，网页就跟着关**（2026-11）。
     //
@@ -4800,6 +4864,16 @@
       if (hit) openDiaryForm('edit', hit);
     }
   };
+
+  // ⚠️ **调试出口**（2026-11）：把内部状态挂到 window 上。
+  //
+  // 为什么需要：日期覆盖层的 `DP` / `S` 都是闭包内的私有变量，
+  // 自检 / 出图时想确认「网页到底读到了哪一份天气」根本读不到 ——
+  // 只能靠猜，猜错就改错地方（这次就绕了半天）。
+  //
+  // ⚠️ 只读，不影响任何逻辑。
+  window.__ttDP = function () { return DP; };
+  window.__ttS = function () { return S; };
 
   // 原生 push 状态用（等价于 ttUpdate 的 dayPanel / dayFlags 扩展）。
   // 传 { dayPanel: {...}, dayFlags: {...} }，可以带，也可以只带其中一个。

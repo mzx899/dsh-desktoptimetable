@@ -175,6 +175,16 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
     /// 生效的总周数（配置值与数据最大周次取大）
     var maxWeek = SemesterConfig.defaultMaxWeek
 
+    /// 课表卡片中心的取值器（由 AppDelegate 接线）。
+    ///
+    /// 为什么不用 `WindowAnchor.provider()`：那条规则里有一条
+    /// 「设置面板是 key 时锚点取**设置面板自己**的中心」——
+    /// 拿它当面板自己的落点基准，就变成**自己跟自己比**（恒为 0），
+    /// `windowDidBecomeKey` 的兜底会变成死代码（见 `cardAnchor()`）。
+    ///
+    /// 没有接线时（自检里直接 new 控制器）→ 返回 nil，兜底不生效。
+    var cardAnchorProvider: (() -> NSPoint?)?
+
     /// 新增：设置面板自身的不透明度
     var panelOpRow: SliderRow!
 
@@ -285,6 +295,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
     private var loginSwitch: NSButton!
     /// 日期覆盖层的设置卡片（接入系统日历 / 提醒事项）。
     private var dayPanelSettingsCard: DayPanelSettingsCard?
+    /// 天气卡片（2026-11-10 从「日期覆盖层」卡里拆出来的独立板块）。
+    private var weatherSettingsCard: WeatherSettingsCard?
     private var leadPopup: NSPopUpButton!
     /// 下拉框当前的结构（条目 ↔ 分钟数的对应关系）。
     ///
@@ -624,10 +636,33 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
     /// 课表拖到哪儿，面板就跟到哪儿；超出屏幕可见区时夹回来。
     ///
     /// `mouse` 参数保留是为了兼容老调用点，不再决定落点。
+    ///
+    /// ⚠️ **基准必须是「课表卡片中心」，不能是 `WindowAnchor.provider()`**
+    /// （2026-11-11 修「第一次打开在左下角」· 第三轮）。
+    /// `provider` 里有一条「设置面板是 key 时锚点取**设置面板自己**的中心」——
+    /// 那是给**面板里弹出来的窗口**用的。面板自己拿它当基准就成了
+    /// **自己跟自己比** → 面板一旦拿到 key，再怎么调 `positionWindow` 都不会动，
+    /// 兜底修正全部失效。这里改用 `cardAnchor()`（只认课表那一侧）。
     func positionWindow(mouse: NSPoint?) {
         guard let win = window else { return }
+        let before = win.frame
+        // 锚点：优先「只认课表」的取值器；没接线时退回全局 provider。
+        let anchor = cardAnchor() ?? WindowAnchor.provider()
         // 以课表中心为锚点（多屏时用课表所在的那块屏）。
-        HUDWindow.centerOnScreen(win, near: mouse)
+        let vf = WindowAnchor.visibleFrame(for: anchor)
+        win.setFrameOrigin(WindowAnchor.origin(forSize: win.frame.size,
+                                              centeredAt: anchor,
+                                              in: vf))
+        // 排查「设置第一次打开在左下角」用：`DT_POS_LOG=1` 时把每次摆位写进 /tmp。
+        if ProcessInfo.processInfo.environment["DT_POS_LOG"] == "1" {
+            let line = "anchor=\(anchor) size=\(before.size) before=\(before.origin) after=\(win.frame.origin)\n"
+            let path = "/tmp/dt-settings-pos.log"
+            if let h = FileHandle(forWritingAtPath: path) {
+                h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); h.closeFile()
+            } else {
+                try? line.write(toFile: path, atomically: true, encoding: .utf8)
+            }
+        }
     }
 
     /// 让设置面板重新对准**当前的课表中心**。
@@ -644,6 +679,14 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
     // 显示 / 提到最前
     func show(relativeTo mouse: NSPoint?) {
         if window == nil { buildWindow() }
+        // ⚠️ **建完窗口立刻摆到课表中心**（2026-11-11 修「第一次打开在左下角」）。
+        //
+        // 新窗口建出来时 origin 是 (0, 0)（实测落到屏幕左下角 (0, 54)）；
+        // 而下面 `reload / syncUI / resetToHome` 要过好几步才轮到 `positionWindow`。
+        // 首次打开时，窗口在这几帧里就可能被合成上屏 —— 用户看到的就是「先在左下角、
+        // 随后跳到中间」。第二次打开时窗口本来就在正确位置，所以看不出问题。
+        // 先摆一次（纯几何，很便宜），后面的 `positionWindow` 再按最新尺寸校准一次。
+        positionWindow(mouse: mouse)
         // ⚠️ **面板的层级保持 `.floating`**（压得住别的 App 的窗口）。
         //
         // 「自检时面板一直悬在用户窗口前面」的解法**不是**改层级 ——
@@ -692,6 +735,50 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
             self?.scrollPanelToTop()
         }
         scrollPanelToTop()
+        // 兜底：`makeKeyAndOrderFront` 之后系统可能动过窗口位置
+        //（状态恢复 / 跨屏适配），下一轮 runloop 再摆一次。
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let win = self.window, win.isVisible else { return }
+            self.positionWindow(mouse: mouse)
+        }
+    }
+
+    /// 窗口刚成为 key 时**自查一次位置**（2026-11-11）。
+    ///
+    /// 用户反馈「第一次打开在左下角、后面正常」。窗口位置可能被系统
+    /// （状态恢复 / 跨屏适配）在 `makeKeyAndOrderFront` 之后动过 —— 这里兜底：
+    /// 只要面板中心离锚点**明显跑偏**（> 200pt），就重新摆一次。
+    /// 200pt 的容差是为了不打断用户把面板拖到别处的正常操作。
+    ///
+    /// ⚠️ **不能用 `WindowAnchor.provider()` 当这里的基准**（2026-11-11 修）：
+    /// `installWindowAnchor` 里有一条规则 ——「设置面板是 key 时锚点取**设置面板自己**的中心」。
+    /// 于是面板一旦拿到 key，`provider()` 返回的就是**它自己的中心**，
+    /// `f.midX - anchor.x` 恒等于 0 → 这条兜底**永远不会触发**（是死代码）。
+    /// 兜底要比的必须是**课表卡片中心**（真正的落点基准），所以这里走
+    /// `cardAnchor` —— 它不读设置面板，永远返回课表那一侧的位置。
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard let win = notification.object as? NSWindow, win == window else { return }
+        guard let anchor = cardAnchor() else { return }
+        let f = win.frame
+        if abs(f.midX - anchor.x) > 200 || abs(f.midY - anchor.y) > 200 {
+            positionWindow(mouse: nil)
+        }
+    }
+
+    /// 课表卡片中心（**不含**「设置面板当锚点」那条规则）。
+    ///
+    /// 「窗口该摆在哪」的**唯一**基准就是课表卡片中心；
+    /// `WindowAnchor.provider()` 多了一条「面板自己是 key 时用面板中心」的规则，
+    /// 那条规则是给**面板里弹出来的窗口**用的，不能拿来当面板自己的落点基准
+    /// （会变成自己跟自己比，见 `windowDidBecomeKey`）。
+    ///
+    /// 没接线时（自检里直接 new 控制器）退回**主屏可见区中心**——
+    /// 和 `WindowAnchor.provider` 的默认值一致（不至于把面板摆到 (0,0)）。
+    ///
+    /// - Returns: 课表卡片中心（屏幕坐标）。
+    func cardAnchor() -> NSPoint? {
+        if let provider = cardAnchorProvider, let p = provider() { return p }
+        return NSScreen.main.map { NSPoint(x: $0.visibleFrame.midX, y: $0.visibleFrame.midY) }
     }
 
     /// 回到收起态（板块首页）—— **不动画**，立刻生效。
@@ -1198,6 +1285,27 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
     /// 自检里这属于干扰，得能把它和「焦点真的丢了」区分开。
     var testOutsideClickCloseCount = 0
 
+    /// 自检用：**窗口第一次可见时**的 frame。
+    ///
+    /// 这是「第一次打开在左下角」这个 bug 的**直接证据**：
+    /// 用户看到的就是「窗口第一次被合成上屏」时的那一帧位置。
+    /// 记下来就能断言「第一次可见时它就在锚点附近」，而不是
+    /// 「最终位置对不对」（最终位置对，中间闪一下左下角用户照样看得见）。
+    ///
+    /// 为 nil 表示「还没可见过」。
+    var testFirstVisibleFrame: NSRect?
+
+    /// 自检用：记录「窗口第一次上屏时」的 frame。
+    ///
+    /// ⚠️ 必须在窗口被 orderFront **之前**记 —— 那才是它被合成上屏的姿态。
+    /// 之后再记就晚了：位置已经被 `positionWindow` 摆正，看不出问题。
+    ///
+    /// 只记**第一次**（第二次开面板时窗口本来就在正确位置，记它没意义）。
+    func recordFirstVisibleFrame() {
+        guard testFirstVisibleFrame == nil, let win = window else { return }
+        testFirstVisibleFrame = win.frame
+    }
+
     /// 自检用：面板被关掉的次数（不管哪条路径）。
     ///
     /// 用来定位「面板为什么不见了」—— 只知道「不见了」没法区分：
@@ -1307,11 +1415,11 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
             backing: .buffered,
             defer: false
         )
-        // 窗口层级抬到 .floating：
-        // 本 app 是 accessory，点桌面卡片上的齿轮时**根本不会变成前台 App**，
-        // 而「非前台的 App 的窗口」在正常层级里永远排在别的 App 窗口后面 ——
-        // 这就是「每次打开设置都在最下面」。抬到 .floating 才压得住。
-        window.level = .floating
+        // 层级交给 `WindowLevelPolicy`（2026-11-10）：
+        // 本 App 在前台时抬到 .floating（accessory app 点齿轮时不会变前台，
+        // 正常层级会掉到别的 App 后面）；用户切到别的 App 时降回 .normal，
+        // 不再压着别人的窗口。
+        WindowLevelPolicy.register(window)
         window.title = "课表设置"
         // 不让 AppKit 自动把焦点给面板里的某个控件（默认会挑「开学日期」的
         // NSDatePicker）—— 控件一拿到焦点，系统会自动把滚动视图滚到它那儿，
@@ -1334,6 +1442,13 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
         // 面板一关，窗口对象就被释放，控制器里的 `window` 变成悬垂指针，
         // 之后任何一次全局鼠标事件都会 objc_retain 野指针 → SIGSEGV。
         window.isReleasedWhenClosed = false
+        // ⚠️ **关掉窗口状态恢复**（2026-11-11 修「第一次打开在左下角」）。
+        //
+        // 系统会把窗口框存进 app 的恢复状态，下次启动 `makeKeyAndOrderFront`
+        // 时再"恢复"回来 —— 我们摆好的位置会被覆盖，而且只在**首次打开**发生
+        //（同一会话第二次不会再恢复）—— 表现就是「第一次在左下角、后面正常」。
+        window.isRestorable = false
+        window.restorationClass = nil
 
         let effect = NSVisualEffectView()
         effect.material = .hudWindow
@@ -1571,10 +1686,12 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
         // 调的是「课表设置」这个窗口自己的透明度，不影响桌面上的课表卡片。
         let panelCard = SettingsCard(title: "设置面板")
         panelOpRow = SliderRow(title: "面板不透明度",
-                               subtitle: "50% = 现在的样子（带毛玻璃感）· 100% = 实心不透",
+                               subtitle: "50% 在正中间（默认）· 20% 最透 · 100% 实心不透",
                                min: 0.2, max: 1.0,
                                value: config.panelOpacity,
-                               step: 0.01, decimals: 2) { String(format: "%.0f%%", $0 * 100) }
+                               step: 0.01, decimals: 2,
+                               // 50% 落在**轨道正中**（20…50 占左半，50…100 占右半）。
+                               midpoint: 0.5) { String(format: "%.0f%%", $0 * 100) }
         panelOpRow.onChange = { [weak self] v in self?.update("panelOpacity", v) }
         panelCard.addRow(panelOpRow)
         stack.addArrangedSubview(panelCard)
@@ -1995,12 +2112,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
         dayPanelCard.onOpenAuthorization = { [weak self] in
             self?.openDayPanelSystemSettings()
         }
-        dayPanelCard.onToggleWeather = { [weak self] enabled in
-            self?.dayPanelWeatherToggled(enabled)
-        }
-        dayPanelCard.onOpenLocationSettings = { [weak self] in
-            self?.openLocationSettings()
-        }
 
         // ---- 第三行：已完成的提醒事项 ----
         let completedRow = dayPanelCard.completedRowView
@@ -2036,6 +2147,21 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
         stack.addArrangedSubview(dayPanelCard)
         dayPanelCard.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         dayPanelSettingsCard = dayPanelCard
+
+        // ---- 天气卡片（**独立板块**，放在日期覆盖层下面）----
+        //
+        // 用户要求（2026-11-10）：「在设置里面也把天气和提醒待办事项分开，
+        // 做成下面独立一个天气板块」。
+        let weatherCard = WeatherSettingsCard()
+        weatherCard.onToggleWeather = { [weak self] enabled in
+            self?.dayPanelWeatherToggled(enabled)
+        }
+        weatherCard.onPickWeatherCity = { [weak self] in
+            self?.promptWeatherCity()
+        }
+        stack.addArrangedSubview(weatherCard)
+        weatherCard.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        weatherSettingsCard = weatherCard
         bindCompletedRemindersService()
 
         // ---- 板块边界：提醒 → 系统 ----
@@ -2156,6 +2282,30 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
 
         // 显示窗口（必须显式 order front，否则进程在跑但没有可见窗口）
         window.isReleasedWhenClosed = false
+        // ⚠️ **先摆位、再上屏**（2026-11-11 修「第一次打开在左下角」· 第三轮）。
+        //
+        // 现象：第一次打开设置面板，面板先**闪一下屏幕左下角**（程序坞上方），
+        // 然后才跳到课表中心；第二次打开就正常。
+        //
+        // 根因（实测，`DT_POS_LOG=1` 的日志）：
+        // ```
+        // PROBE buildWindow.orderFront       frame=(0.0, 54.0, 580.0, 152.0) visible=false
+        // PROBE buildWindow.afterOrderFront  frame=(0.0, 54.0, 580.0, 152.0) visible=true
+        // anchor=(755.5, 522.5) before=(0.0, 54.0) after=(465.0, 446.0)
+        // ```
+        // 新窗口建出来时 origin 是 **(0, 54)**（屏幕左下角），而**这个 `orderFront`
+        // 把窗口直接摆到了前面** —— 面板以左下角的姿态上屏了至少一帧。
+        // `show()` 里的 `positionWindow` 是**之后**才跑的（它按最终尺寸校准位置），
+        // 于是用户看到「先在左下角、再跳到中间」。
+        //
+        // 第二次打开之所以正常：`buildWindow()` 不再跑，窗口早已在正确位置。
+        //
+        // 修法：**上屏之前先摆到锚点**。`positionWindow` 是纯几何，很便宜，
+        // 在这里调一次即可；`show()` 里那次保留（按 `resetToHome` 之后的最终尺寸再校准）。
+        positionWindow(mouse: nil)
+        // 自检用：记下「上屏那一刻」的 frame（bug 的直接证据）。
+        // 必须在 orderFront **之前**记 —— 之后位置已经被摆正，看不出问题。
+        recordFirstVisibleFrame()
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
     }
@@ -2690,6 +2840,33 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
         dayPanelController?.openSystemSettings()
     }
 
+    /// 弹「选择地区」选择器（热门城市 + 拼音首字母 + 搜索）。
+    ///
+    /// 2026-11-10：以前这一行是个裸输入框，用户要自己把城市名打对；
+    /// 现在点一下弹选择器，选中即保存并立刻刷新生效（不用关设置再开）。
+    private func promptWeatherCity() {
+        let current = appSettings.dayPanel.weatherCity
+        guard let picked = CityPickerDialog.show(current: current) else { return }
+        dayPanelWeatherCityChanged(picked)
+    }
+
+    /// 天气城市改了（**定位的降级方案**，2026-11）。
+    ///
+    /// 填了城市 → 用 Open-Meteo 的地名搜索拿坐标（不碰定位权限）；
+    /// 清空 → 回到系统定位。
+    private func dayPanelWeatherCityChanged(_ city: String) {
+        var current = appSettings
+        current.dayPanel.weatherCity = city
+        appSettings = current
+        do {
+            try settingsStore.save(current)
+        } catch {
+            NSLog("[DesktopTimetable] 保存天气城市失败：%@", error.localizedDescription)
+        }
+        dayPanelController?.updateSettings(current.dayPanel)
+        refreshDayPanelRows()
+    }
+
     /// 天气开关切换。
     ///
     /// 开 → 请求一次定位授权（系统弹窗）。
@@ -2737,9 +2914,11 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
         card.update(enabled: appSettings.dayPanel.enabled,
                    authState: state,
                    listName: appSettings.dayPanel.listTitle,
-                   weatherEnabled: appSettings.dayPanel.weatherEnabled,
-                   locationAuthStatus: dayPanelController?.locationAuthorizationStatus,
                    completedAccess: completedAccess())
+        // 天气是**另一张卡**（2026-11-10 拆的）。
+        weatherSettingsCard?.update(weatherEnabled: appSettings.dayPanel.weatherEnabled,
+                                    locationAuthStatus: dayPanelController?.locationAuthorizationStatus,
+                                    weatherCity: appSettings.dayPanel.weatherCity)
         // 入口状态变了：原来展开着但现在已经不可用 → 收起并作废在途读取。
         if completedExpanded && completedAccess() != .ready {
             completedExpanded = false
@@ -3243,10 +3422,15 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
         var probe = DayPanelCardProbe()
         guard let card = dayPanelSettingsCard else { return probe }
         probe.hasCard = true
-        probe.weatherOn = card.isWeatherEnabled
-        probe.weatherStatus = card.displayedWeatherStatus
-        probe.showsAuthorizeButton = card.showsWeatherAuthorizeButton
-        probe.cardHeight = card.frame.height
+        // 天气现在是独立卡片：开关 / 状态 / 高度都从它读。
+        if let wc = weatherSettingsCard {
+            probe.weatherOn = wc.isWeatherEnabled
+            probe.weatherStatus = wc.displayedWeatherStatus
+            probe.showsAuthorizeButton = wc.showsWeatherAuthorizeButton
+            probe.cardHeight = wc.frame.height
+        } else {
+            probe.cardHeight = card.frame.height
+        }
         return probe
     }
 
@@ -4362,7 +4546,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
         }
         diarySummaryLabel?.stringValue = diaryEntries.isEmpty
             ? "还没有日记。日期覆盖层里点「＋ 写日记」，或者这里点「新建」。"
-            : "共 \(diaryEntries.count) 篇。列表按日期倒序；点一行选中，再点「编辑」或「删除」。"
+            : "共 \(diaryEntries.count) 篇。列表按日期倒序；**双击一行直接编辑**，单击选中后可点「删除」。"
         for v in diaryListStack.arrangedSubviews {
             diaryListStack.removeArrangedSubview(v)
             v.removeFromSuperview()
@@ -4373,6 +4557,10 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
                 guard let self else { return }
                 self.selectedDiaryID = entry.id
                 self.refreshDiaryList()
+            }
+            // 双击 → 直接打开这一篇的编辑窗口（不用先选中再点「编辑」）。
+            row.onDoubleClick = { [weak self] in
+                self?.openDiaryEditor(id: entry.id)
             }
             row.translatesAutoresizingMaskIntoConstraints = false
             diaryListStack.addArrangedSubview(row)
@@ -4457,9 +4645,9 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
 
     @objc private func newDiaryEntry() {
         guard let result = DiaryEditorDialog.run(title: "写日记", entry: nil, confirmTitle: "保存") else { return }
-        let date = DiaryStore.dateKey(Date())
+        // 日期由编辑框决定（默认今天，可改到别的日子）。
         do {
-            let entry = try diaryStore.add(date: date, title: result.title,
+            let entry = try diaryStore.add(date: result.date, title: result.title,
                                            body: result.body, time: result.time)
             selectedDiaryID = entry.id
             refreshDiaryList()
@@ -4469,13 +4657,19 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
     }
 
     @objc private func editDiaryEntry() {
-        guard let id = selectedDiaryID,
-              let entry = diaryEntries.first(where: { $0.id == id }) else { return }
+        guard let id = selectedDiaryID else { return }
+        openDiaryEditor(id: id)
+    }
+
+    /// 打开某一篇日记的编辑窗口（双击列表 / 「编辑」按钮都走这里）。
+    private func openDiaryEditor(id: String) {
+        guard let entry = diaryEntries.first(where: { $0.id == id }) else { return }
         guard let result = DiaryEditorDialog.run(title: "修改日记", entry: entry,
                                                  confirmTitle: "保存") else { return }
         do {
             try diaryStore.update(id: id, title: result.title,
-                                  body: result.body, time: result.time)
+                                  body: result.body, time: result.time,
+                                  date: result.date)
             refreshDiaryList()
         } catch {
             statusLabel.stringValue = "保存日记失败：\(error.localizedDescription)"

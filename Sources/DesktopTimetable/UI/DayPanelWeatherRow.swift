@@ -1,25 +1,25 @@
 import AppKit
 import CoreLocation
 
-/// 「天气」设置行（日期覆盖层卡片里的第三行）。
+/// 「天气」设置行（日期覆盖层卡片里的第四行）。
 ///
-/// ## 用户选的方案是 B：系统定位（CoreLocation）
+/// 布局（2026-11-10 改）：
+/// ```
+/// 显示天气                       [开关]
+/// 按「秦皇岛」显示天气（不需要定位权限）。
+/// 地区                秦皇岛  ›      ← 整行可点，弹城市选择器
+/// ```
 ///
-/// 所以这一行**不是**一个「填城市名」的输入框 —— 城市由系统定位决定。
-/// 这一行做的是：
-///   · 一个开关：要不要显示天气；
-///   · 一个状态说明：定位授权是什么状态；
-///   · 一个「去系统设置授权」按钮（没授权时才出现）。
+/// ## 为什么是「选」而不是「填」
 ///
-/// ## 为什么不给「手填城市」的输入框
+/// 手打城市名容易打错（「秦皇岛」打成「秦皇島」就查不到 → 面板只会显示「暂无数据」，
+/// 用户看不出是自己打错了）。现在点这一行弹 `CityPickerDialog`：
+/// 热门城市 + 拼音首字母排序 + 搜索框。
 ///
-/// 用户明确选了系统定位。手填城市作为**降级**方案也留了口子
-/// （`DayPanelSettings.weatherCity`），但那是给「用户不想开定位权限」时用的，
-/// 本轮先不暴露在界面上 —— 等用户提出「我不授权定位」时再接上。
+/// ## 为什么没有「去授权」按钮了
 ///
-/// ## 隐私
-///
-/// 位置只发给 Open-Meteo 查天气；**不做 IP 推断**，不把 IP 发给任何第三方。
+/// 本机实测（2026-11-10）：ad-hoc 签名的 app 请求定位，系统 **2 秒内直接 denied、
+/// 零弹框**。引导用户去点一个永远不会生效的授权按钮，比不引导更糟。
 final class DayPanelWeatherRow: NSView {
 
     // MARK: - 公开回调
@@ -27,15 +27,15 @@ final class DayPanelWeatherRow: NSView {
     /// 用户拨动了「显示天气」开关（参数 = 拨动之后的目标值）。
     var onToggleWeather: ((Bool) -> Void)?
 
-    /// 用户点了「去系统设置授权」。
-    var onOpenLocationSettings: (() -> Void)?
+    /// 用户点了「地区」那一行 → 该弹城市选择器了。
+    var onPickCity: (() -> Void)?
 
     // MARK: - 子视图
 
     private let toggle = NSSwitch()
     private let titleLabel = NSTextField(labelWithString: "显示天气")
     private let statusLabel = NSTextField(labelWithString: "")
-    private let authorizeButton = NSButton(title: "去授权", target: nil, action: nil)
+    private let regionRow = WeatherRegionRow()
 
     /// 开关当前是开是关。
     var isOn: Bool { toggle.state == .on }
@@ -43,8 +43,8 @@ final class DayPanelWeatherRow: NSView {
     /// 当前显示的状态说明（自检用）。
     var displayedStatus: String { statusLabel.stringValue }
 
-    /// 「去授权」按钮现在该显示吗（自检用）。
-    var showsAuthorizeButton: Bool { !authorizeButton.isHidden }
+    /// 当前选中的地区（自检用）。
+    var cityText: String { regionRow.value }
 
     init() {
         super.init(frame: .zero)
@@ -64,17 +64,13 @@ final class DayPanelWeatherRow: NSView {
         toggle.action = #selector(toggled)
         toggle.translatesAutoresizingMaskIntoConstraints = false
 
-        authorizeButton.target = self
-        authorizeButton.action = #selector(openSettings)
-        authorizeButton.bezelStyle = .rounded
-        authorizeButton.controlSize = .small
-        authorizeButton.font = .systemFont(ofSize: 11)
-        authorizeButton.translatesAutoresizingMaskIntoConstraints = false
+        regionRow.onTap = { [weak self] in self?.onPickCity?() }
+        regionRow.translatesAutoresizingMaskIntoConstraints = false
 
         addSubview(titleLabel)
         addSubview(statusLabel)
-        addSubview(authorizeButton)
         addSubview(toggle)
+        addSubview(regionRow)
 
         NSLayoutConstraint.activate([
             titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -82,59 +78,122 @@ final class DayPanelWeatherRow: NSView {
 
             statusLabel.leadingAnchor.constraint(equalTo: leadingAnchor),
             statusLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
-            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: authorizeButton.leadingAnchor, constant: -8),
-            // ⚠️ 必须把底边钉住，否则这一行没有「高度定义」——
-            // 作为卡片最后一行时会被压成 0pt，状态文字和开关画到卡片外面
-            //（2026-11-05 加「已完成的提醒事项」时暴露：天气行被裁掉一半）。
-            statusLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
-
-            authorizeButton.trailingAnchor.constraint(equalTo: trailingAnchor),
-            authorizeButton.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
+            statusLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
 
             toggle.trailingAnchor.constraint(equalTo: trailingAnchor),
             toggle.topAnchor.constraint(equalTo: titleLabel.topAnchor, constant: -2),
+
+            // 地区行：整行的底边就是这一行的底边（状态文字不再单独钉底，
+            // 否则两条约束会打架，把地区那一行挤出卡片 —— 2026-11-10 修）。
+            regionRow.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 6),
+            regionRow.leadingAnchor.constraint(equalTo: leadingAnchor),
+            regionRow.trailingAnchor.constraint(equalTo: trailingAnchor),
+            regionRow.heightAnchor.constraint(equalToConstant: 24),
+            regionRow.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
         ])
     }
 
     /// 灌入当前状态。
-    ///
-    /// - Parameters:
-    ///   - enabled：要不要显示天气。
-    ///   - authStatus：定位授权状态（`nil` = 还没问过）。
-    func update(enabled: Bool, authStatus: CLAuthorizationStatus?) {
+    func update(enabled: Bool, authStatus: CLAuthorizationStatus?, city: String = "") {
         toggle.state = enabled ? .on : .off
-        let (text, needsButton) = Self.describe(enabled: enabled, authStatus: authStatus)
-        statusLabel.stringValue = text
-        authorizeButton.isHidden = !needsButton
+        statusLabel.stringValue = Self.describe(enabled: enabled, authStatus: authStatus,
+                                                city: city).text
+        regionRow.value = city.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// 状态文案（**纯函数**，方便单测）。
-    static func describe(enabled: Bool, authStatus: CLAuthorizationStatus?) -> (text: String, needsButton: Bool) {
+    static func describe(enabled: Bool, authStatus: CLAuthorizationStatus?,
+                         city: String = "") -> (text: String, needsButton: Bool) {
         guard enabled else {
             return ("关闭时不显示天气。", false)
         }
-        switch authStatus {
-        case .authorizedAlways, .authorizedWhenInUse:
-            return ("按你的位置显示当天的天气（只用于查询天气）。", false)
-        case .denied:
-            return ("系统没有授予定位权限，封面层不会显示天气。", true)
-        case .restricted:
-            return ("系统限制了定位，封面层不会显示天气。", true)
-        case .notDetermined:
-            return ("需要一次定位授权才能显示天气。", true)
-        case nil:
-            return ("正在检查定位权限…", false)
-        @unknown default:
-            return ("定位权限状态未知。", false)
+        // ⚠️ **地区是唯一可靠的取数入口**（2026-11-10 实测结论）：
+        // `make app` 是 ad-hoc 签名，macOS 对 ad-hoc 签名的 app **静默拒绝**
+        // 定位（`requestWhenInUseAuthorization()` 2 秒内直接 denied、无弹框），
+        // 所以这里不再引导「去授权」，直接让用户选地区。
+        let trimmed = city.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            return ("按「\(trimmed)」显示天气（不需要定位权限）。", false)
         }
+        return ("还没选地区：日期覆盖层会提示「请在设置里选择地区」。", false)
     }
 
     @objc private func toggled() {
         onToggleWeather?(toggle.state == .on)
     }
 
-    @objc private func openSettings() {
-        onOpenLocationSettings?()
+    /// 设置地区（自检 / 外部灌值）。
+    func setCity(_ name: String) {
+        regionRow.value = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+}
+
+/// 「地区」那一行：左边标题、右边当前地区 + 箭头，**整行可点**。
+///
+/// 和 `DayPanelListRow`（提醒事项清单）保持同一套观感。
+private final class WeatherRegionRow: NSButton {
+
+    var onTap: (() -> Void)?
+
+    /// 当前地区（空串 = 还没选）。
+    var value: String = "" {
+        didSet { valueLabel.stringValue = value.isEmpty ? "未选择" : value }
+    }
+
+    private let titleLabel = NSTextField(labelWithString: "地区")
+    private let valueLabel = NSTextField(labelWithString: "未选择")
+    private let chevron = NSImageView()
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        isBordered = false
+        isTransparent = true
+        focusRingType = .none
+        title = "地区"
+        setAccessibilityLabel("地区")
+
+        titleLabel.font = .systemFont(ofSize: 12)
+        titleLabel.textColor = NSColor.white.withAlphaComponent(0.62)
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        valueLabel.font = .systemFont(ofSize: 12)
+        valueLabel.textColor = NSColor.white.withAlphaComponent(0.88)
+        valueLabel.alignment = .right
+        valueLabel.lineBreakMode = .byTruncatingTail
+        valueLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        chevron.image = NSImage(systemSymbolName: "chevron.right",
+                                accessibilityDescription: "选择地区")
+        chevron.image?.isTemplate = true
+        chevron.contentTintColor = NSColor.white.withAlphaComponent(0.35)
+        chevron.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
+        chevron.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(titleLabel)
+        addSubview(valueLabel)
+        addSubview(chevron)
+
+        NSLayoutConstraint.activate([
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor),
+            titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            chevron.trailingAnchor.constraint(equalTo: trailingAnchor),
+            chevron.centerYAnchor.constraint(equalTo: centerYAnchor),
+            chevron.widthAnchor.constraint(equalToConstant: 9),
+
+            valueLabel.trailingAnchor.constraint(equalTo: chevron.leadingAnchor, constant: -5),
+            valueLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            valueLabel.leadingAnchor.constraint(greaterThanOrEqualTo: titleLabel.trailingAnchor,
+                                                constant: 8),
+        ])
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onTap?()
+        super.mouseDown(with: event)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }

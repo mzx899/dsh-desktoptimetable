@@ -32,6 +32,10 @@ enum AutomationMode {
         "--verify-panel-sections",
         "--verify-panel-animation",
         "--verify-panel-click",
+        // 设置面板「第一次打开在左下角」的回归自检（2026-11-11）。
+        // 不登记的话它会以非自动化模式运行 → `reloadData()` 走到
+        // `refreshReminderSchedule()` → 清掉用户真实排好的上课提醒。
+        "--verify-settings-first-open",
         "--shot-panel-mid",
         // 设置面板出图入口。不登记的话它会以**非自动化模式**运行：
         // `reloadData()` 走到 `refreshReminderSchedule()` → 清掉用户真实排好的提醒。

@@ -28,7 +28,7 @@ final class ScheduleStore {
         "fadeOutSec": 6.0,    // 变虚（鼠标移开）秒数
         "minOpacity": 0.22,   // 静置不透明度：0=全透明，1=不虚化
         "maxOpacity": 1.0,    // 悬停不透明度：0=看不见，1=完全清晰
-        "panelOpacity": 1.0,  // 设置面板自身的不透明度
+        "panelOpacity": 0.5,  // 设置面板自身的不透明度（50% = 毛玻璃感，滑杆在正中）
     ]
 
     let directory: URL

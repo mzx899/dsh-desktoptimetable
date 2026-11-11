@@ -40,9 +40,10 @@ enum HUDWindow {
         window.isMovableByWindowBackground = true
         window.backgroundColor = .clear
         window.isReleasedWhenClosed = false
-        // 层级抬到 .floating：设置面板也是这一层，弹窗后开的自然排在它前面；
-        // 而且 accessory App 在非前台时，正常层级的窗口会排到别的 App 后面。
-        window.level = .floating
+        // 层级交给 `WindowLevelPolicy`：本 App 在前台时 .floating（否则点齿轮打开设置时
+        // 窗口会掉到别的 App 后面），切到别的 App 时降回 .normal，不再压着人家
+        // （2026-11-10 用户反馈）。
+        WindowLevelPolicy.register(window)
         if !showsFullScreen {
             window.standardWindowButton(.zoomButton)?.isHidden = true
         }

@@ -185,8 +185,26 @@ final class DayPanelController {
     /// 网页侧 `DP.cache[day]` 永远有正确的那一天，不会串。
     private var festivalByDay: [Int: DayPanelFestival] = [:]
 
+    /// 天气请求**是不是在飞**（2026-11 加）。
+    ///
+    /// 按**日期**记住取回来的天气（`2026-11-10` → 天气）。
+    ///
+    /// ⚠️ 为什么单独存：`festivalByDay` 每次 `refreshFestivalCache` 都会整份重算，
+    /// 天气是异步加进去的，重算就会丢。这里按日期存一份，重算时再贴回去。
+    private var weatherByDate: [String: DayPanelWeather] = [:]
+
+    /// 跟随模式下指针扫过每一列都会调 `loadWeather`；
+    /// 不做去重的话，一天能发几十次 Open-Meteo 请求，而且互相抢回包。
+    private var weatherRequestInFlight = false
+    /// 等着这次天气结果的所有回调（去重后一起分发）。
+    private var weatherPendingApplies: [([String: DayPanelWeather]) -> Void] = []
+
     /// 今天的日期在「周几」上的位置（1=周一 … 7=周日）。
-    private let todayIndex: Int
+    ///
+    /// ⚠️ **可更新**（2026-11 加）：用户开着面板过 12 点，`todayIndex`
+    /// 必须跟着换一天（`isToday` / 今日待办摘要都依赖它），
+    /// 天气也要按新的一天重新取。见 `handleDayChange`。
+    private var todayIndex: Int
 
     /// 当前浏览的那一周的起始日期（用来把「周几」换算成具体日期）。
     ///
@@ -332,6 +350,14 @@ final class DayPanelController {
     /// 自动化模式下没有位置管理器 → 返回 nil（= 还没问过）。
     var locationAuthorizationStatus: CLAuthorizationStatus? {
         (weatherProvider as? OpenMeteoWeatherProvider)?.authorizationStatus
+    }
+
+    /// 设置里填的**地区名**（去掉首尾空白；空串 = 还没选）。
+    ///
+    /// ⚠️ 2026-11-10：天气开着但没选地区时，网页要显示
+    /// 「请在设置里选择地区」—— 所以这个值必须随 `festival` 一起推过去。
+    private var weatherRegion: String {
+        settings.weatherCity.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// 请求一次定位授权（用户打开「显示天气」时调）。
@@ -494,7 +520,29 @@ final class DayPanelController {
 
     /// 换一份设置（设置面板改了开关或清单后调用）。
     func updateSettings(_ new: DayPanelSettings) {
+        let weatherTurnedOff = settings.weatherEnabled && !new.weatherEnabled
+        let weatherTurnedOn = !settings.weatherEnabled && new.weatherEnabled
+        // ⚠️ **换了地区 → 旧地区的天气必须清掉**（2026-11-10）。
+        // 天气是按日期缓存的（`weatherByDate`），不清的话换城市后
+        // 面板会先显示**上一个城市**的天气，看起来像「数据不对」。
+        let regionChanged = settings.weatherCity.trimmingCharacters(in: .whitespacesAndNewlines)
+            != new.weatherCity.trimmingCharacters(in: .whitespacesAndNewlines)
         settings = new
+        // 「显示天气」开关直接影响面板里那一行 —— 改了要立刻生效，
+        // 不用等用户关掉再打开覆盖层（设置页的注释是这么承诺的）。
+        content.weatherEnabled = new.weatherEnabled
+        if weatherTurnedOff || regionChanged {
+            content.festival.weather = nil
+            weatherByDate.removeAll()
+            for key in festivalByDay.keys { festivalByDay[key]?.weather = nil }
+        }
+        if currentDay != nil {
+            // 先推一版：关掉 → 天气行消失；打开 → 先显示「暂无数据」。
+            pushState()
+            if (weatherTurnedOn || regionChanged), let day = currentDay {
+                loadWeather(day: day, token: contentToken)
+            }
+        }
         refreshAll()
     }
 
@@ -655,6 +703,35 @@ final class DayPanelController {
         guard currentDay != nil else { return }
         currentDay = nil
         pushState()
+    }
+
+    /// 跨天（过了 12 点）：更新「今天」是哪一列，并把天气重新取一遍。
+    ///
+    /// 由 `AppDelegate.startRefreshTimer` 每 10 秒对一次日期后调用
+    /// （睡眠唤醒后定时器会补跑，所以不需要单独的午夜定时器）。
+    ///
+    /// 用户要求：「每天过 12 点了就更新」。这里只换 `todayIndex` 与天气；
+    /// 农历 / 节气 / 节日是按 `baseMonday` 算的，同一天内不会变。
+    ///
+    /// - Parameter now: 自检可以传固定日期。
+    func handleDayChange(now: Date = Date()) {
+        let newIndex = WeekMath.todayIndex(now)
+        guard newIndex != todayIndex else { return }
+        todayIndex = newIndex
+        // 天气属于**具体的一天**：新的一天不能沿用昨天的温度 / 天气现象。
+        // （provider 的缓存键也带日期，见 `OpenMeteoWeatherProvider.cacheKey`。）
+        content.festival.weather = nil
+        weatherByDate.removeAll()
+        for key in festivalByDay.keys { festivalByDay[key]?.weather = nil }
+        content.todoDigest = nil
+        guard let day = currentDay else { return }
+        content.isToday = (day == todayIndex)
+        // 立刻推一版（天气行先变成「暂无数据」），再异步取新的一天。
+        pushState()
+        loadWeather(day: day, token: contentToken)
+        if day == todayIndex {
+            refreshTodoDigest(day: day)
+        }
     }
 
     // MARK: - 待办增删改
@@ -1197,7 +1274,19 @@ final class DayPanelController {
         var out: [Int: DayPanelFestival] = [:]
         for day in 1...7 {
             guard let date = dayDate(day) else { continue }
-            out[day] = festivalProvider.festival(on: date)
+            var f = festivalProvider.festival(on: date)
+            // ⚠️ **天气要按日期补回来**（2026-11-10 修「切到别的列再切回来，天气就没了」）。
+            //
+            // 节日是纯计算、每次都能重算；天气是**异步取回来**的，只存在
+            // `weatherByDate` 里。以前这里直接 `out[day] = festivalProvider.festival(...)`，
+            // 等于每开一次面板就把天气抹一次 —— 面板先闪「暂无数据」，
+            // 要等下一个网络 / 缓存回包才回来；回包一慢或者撞上「已有请求在飞」，
+            // 天气就一直不回来了（用户反馈）。
+            //
+            // 用**日期**而不是「周几」当键：翻周之后同一个下标是另一天，
+            // 按周几记会把上一周的天气串过来。
+            f.weather = weatherByDate[Self.dateKey(date)]
+            out[day] = f
         }
         festivalByDay = out
     }
@@ -1221,6 +1310,10 @@ final class DayPanelController {
         content.day = day
         content.isToday = (day == todayIndex)
         content.todoDigest = nil   // 每次换天 / 重载都重新算
+        // 「显示天气」开关是全局设置 —— 网页用它区分「暂不显示」和「暂无数据」。
+        content.weatherEnabled = settings.weatherEnabled
+        // 地区（空串 = 还没选 → 网页提示「请在设置里选择地区」）。
+        content.weatherRegion = weatherRegion
         // 7 天的「今日详情」**一次算好**（纯计算，很便宜）——
         // 算完存进 `festivalByDay`，push 时一起给网页。
         refreshFestivalCache()
@@ -1237,8 +1330,13 @@ final class DayPanelController {
             // 于是每次打开某天，日记都会被「读进来 → 立刻清掉」，
             // 面板永远显示空，设置里也因为同一次读写的时序看不到。
             // 现在统一在下面（reset 之后）读一次。
-            // 天气也要清 —— 否则新的一天会暂时显示**昨天**的天气。
-            content.festival.weather = nil
+            // ⚠️ **天气不要在这里清**（2026-11-10 修「切到别的列再切回来，天气就没了」）。
+            //
+            // 上面 `content.festival` 已经是从 `festivalByDay[day]` 取出来的 ——
+            // 每一天各一份，本来就**不会串天**（串天是 1.5.4 之前的 bug）。
+            // 以前这里再清一次，等于每次开列都先把天气抹掉：
+            // 面板会先闪一下「暂无数据」，然后要等一次异步取数才回来；
+            // 取数一旦慢 / 失败（或同一时刻有别的请求在飞），天气就一直不回来了。
             // ⚠️ 这是**中间态** —— 待办 / 日程还没查。
             // 网页看到 `ready: false` 才知道「还不能算有完整数据」，
             // 之后换周回来 / 跟随打开时会补发请求（见 Timetable.js 的 `DP.loaded`）。
@@ -1557,7 +1655,7 @@ final class DayPanelController {
     /// ## 失败时的行为
     ///
     /// 拿不到位置（用户拒绝授权 / 没网络 / 超时）→ `content.festival.weather`
-    /// 保持 nil → 网页**隐藏整行天气**。
+    /// 保持 nil → 网页在「显示天气」开着时显示**「暂无数据」**。
     ///
     /// **绝不显示假数据**（比如「0°」或编出来的天气现象）。
     ///
@@ -1567,37 +1665,155 @@ final class DayPanelController {
     /// 真实模式才用 `OpenMeteoWeatherProvider`。
     private func loadWeather(day: Int, token: Int) {
         // ⚠️ 用户没开「显示天气」→ 什么都不做（不请求定位、不联网）。
-        guard settings.weatherEnabled else { return }
-        guard let provider = weatherProvider else { return }
+        guard settings.weatherEnabled else {
+            DiagLog.info("天气：loadWeather 跳过（天气开关是关的）")
+            return
+        }
+        guard let provider = weatherProvider else {
+            DiagLog.info("天气：loadWeather 跳过（没有 weatherProvider）")
+            return
+        }
+        DiagLog.info("天气：loadWeather day=\(day) 已有天气=\(content.festival.weather != nil)")
         // 已经有天气了（同一列重新打开）→ 不用重新取。
+        // 跨天时 `handleDayChange` 会先清掉它，所以不会把昨天的天气留下来。
         if content.festival.weather != nil { return }
 
-        if let fake = provider as? OpenMeteoWeatherProvider {
-            fake.fetchWeather { [weak self] weather in
-                DispatchQueue.main.async {
-                    guard let self else { return }
-                    // ⚠️ **竞态防线**（同 todos / events）：
-                    // 用户可能已经切到别的列 / 别的周了 —— 过期回包直接丢掉。
-                    guard token == self.contentToken, self.currentDay == day else { return }
-                    guard let weather, !weather.isEmpty else { return }
-                    self.content.festival.weather = weather
-                    self.pushState()
+        // ⚠️ **别把回包绑死在「发起请求的那一列」上**（2026-11 修「永远没有天气」）。
+        //
+        // 以前这里判 `token == contentToken && currentDay == day` ——
+        // 指针扫过 3 列，contentToken 就变了，**所有回包全被丢掉**，
+        // 面板永远停在「暂无数据」（用户反馈：授权给了、坐标也拿到了，还是没天气）。
+        //
+        // 预报是**按天**的（7 天），回来后按日期填进 7 天详情 —— 每一列拿自己那天的。
+        let apply: ([String: DayPanelWeather]) -> Void = { [weak self] forecast in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard !forecast.isEmpty else { return }
+                // ⚠️ **按日期填进 7 天详情**（2026-11 修「天气一直显示在别的天上」）。
+                //
+                // 以前是「把今天的天气贴到发起请求的那一列」——
+                // 指针扫到哪列就写哪列，于是天气出现在"你碰过的某一列"。
+                // 现在每一列按**自己那天的日期**去预报里取：
+                //   · 日期对得上 → 显示那一天自己的天气（含最高 / 最低温）；
+                //   · 对不上（超出 7 天预报范围）→ 这一列没有天气。
+                var filled = 0
+                for key in self.festivalByDay.keys {
+                    var f = self.festivalByDay[key] ?? DayPanelFestival()
+                    if let date = self.dayDate(key) {
+                        let dayKey = Self.dateKey(date)
+                        f.weather = forecast[dayKey]
+                        // 按日期存一份 —— `refreshFestivalCache` 重算时贴回去。
+                        if let w = forecast[dayKey] { self.weatherByDate[dayKey] = w }
+                        let w = forecast[dayKey]
+                        let lunarText = self.festivalByDay[key]?.lunar ?? "?"
+                        DiagLog.info("天气：第\(key)列 → \(dayKey)（\(lunarText)） → \(w?.text ?? "无") \(w.map { "min\(String(Int($0.min ?? 0))) max\(String(Int($0.max ?? 0)))" } ?? "")")
+                        DiagLog.info("天气：预报字典的键 = \(forecast.keys.sorted().joined(separator: ","))")
+                    } else {
+                        f.weather = nil
+                    }
+                    if f.weather != nil { filled += 1 }
+                    self.festivalByDay[key] = f
                 }
-            }
-        } else {
-            // 假 provider（自检）：同步拿，直接填。
-            provider.requestCurrentLocation { [weak self] coord in
-                DispatchQueue.main.async {
-                    guard let self else { return }
-                    guard token == self.contentToken, self.currentDay == day else { return }
-                    guard let coord,
-                          let weather = provider.weather(for: coord),
-                          !weather.isEmpty else { return }
-                    self.content.festival.weather = weather
-                    self.pushState()
+                // 当前看着的那一列 → 同步到 content（网页从 `dayFestivals` 取，
+                // 但 content 这份也保持一致，别的地方会读）。
+                if let cur = self.currentDay,
+                   let f = self.festivalByDay[cur] {
+                    self.content.festival.weather = f.weather
+                }
+                DiagLog.info("天气：预报已填进 7 天详情（有天气的列数=\(filled)/\(self.festivalByDay.count)）")
+                self.pushState()
+                // ⚠️ 诊断：把**真正推给网页**的两处天气打出来（dayFestivals["2"] 和 dayPanel）。
+                if let f2 = self.festivalByDay[2] {
+                    DiagLog.info("天气：推给网页 dayFestivals[2] = \(f2.weather.map { "\($0.text) min\(String(Int($0.min ?? 0))) max\(String(Int($0.max ?? 0)))" } ?? "nil")")
+                }
+                if let c = self.content.festival.weather {
+                    DiagLog.info("天气：推给网页 dayPanel.festival.weather = \(c.text) min\(String(Int(c.min ?? 0))) max\(String(Int(c.max ?? 0))) 当前列=\(String(describing: self.currentDay))")
+                } else {
+                    DiagLog.info("天气：推给网页 dayPanel.festival.weather = nil 当前列=\(String(describing: self.currentDay))")
                 }
             }
         }
+
+        // ⚠️ **同一时刻只发一次请求**（2026-11 修「扫 7 列发 7 次网络请求」）。
+        //
+        // 跟随模式下指针扫过每一列都会调 `loadWeather` ——
+        // 以前每次都发一次 Open-Meteo 请求（一天几十次），还互相抢回包。
+        // 现在：已经在取 → 直接复用那一次的结果。
+        if weatherRequestInFlight {
+            DiagLog.info("天气：已有请求在飞，复用")
+            weatherPendingApplies.append(apply)
+            return
+        }
+        weatherRequestInFlight = true
+        weatherPendingApplies.append(apply)
+
+        // ⚠️ **优先用手填的城市**（2026-11）。
+        //
+        // 后台程序弹不出定位授权框 → 天气永远拿不到。
+        // 用户填了城市名 → 用 Open-Meteo 的地名搜索拿坐标（**不碰定位**）。
+        // 没填 → 走系统定位。
+        let city = settings.weatherCity.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !city.isEmpty {
+            // ⚠️ **内置坐标表优先**（2026-11-10）：运城 / 连云港 / 湖州 / 港澳台这些
+            // 在 Open-Meteo 地名库里要么搜不到、要么被国家字段筛掉。
+            // 城市目录里选了它们就直接用写死的坐标，不查地名服务。
+            if let builtin = WeatherCityCatalog.coordinate(for: city) {
+                fetchForecast(at: CLLocationCoordinate2D(latitude: builtin.lat,
+                                                         longitude: builtin.lon))
+                return
+            }
+            provider.resolveCity(city) { [weak self] coord in
+                guard let self else { return }
+                guard let coord else {
+                    self.finishWeatherRequest([:])
+                    return
+                }
+                self.fetchForecast(at: coord)
+            }
+        } else {
+            fetchForecastAtCurrentLocation()
+        }
+    }
+
+    /// 按**当前定位**取预报。
+    private func fetchForecastAtCurrentLocation() {
+        guard let provider = weatherProvider else {
+            finishWeatherRequest([:])
+            return
+        }
+        provider.requestCurrentLocation { [weak self] coord in
+            guard let self else { return }
+            guard let coord else {
+                self.finishWeatherRequest([:])
+                return
+            }
+            self.fetchForecast(at: coord)
+        }
+    }
+
+    /// 按指定坐标取预报（城市查出来的坐标也走这里）。
+    private func fetchForecast(at coord: CLLocationCoordinate2D) {
+        guard let provider = weatherProvider else {
+            finishWeatherRequest([:])
+            return
+        }
+        provider.fetchForecast(at: coord) { [weak self] forecast in
+            self?.finishWeatherRequest(forecast)
+        }
+    }
+
+    /// 一次天气请求结束 → 把结果分发给所有等着的人，并清掉「在飞」标志。
+    private func finishWeatherRequest(_ forecast: [String: DayPanelWeather]) {
+        let applies = weatherPendingApplies
+        weatherPendingApplies = []
+        weatherRequestInFlight = false
+        for a in applies { a(forecast) }
+    }
+
+    /// 日期 → `2026-11-10`（与 Open-Meteo `daily.time` 同格式）。
+    static func dateKey(_ date: Date, calendar: Calendar = .current) -> String {
+        let c = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
     }
 
     /// 刷新 7 天的标记（表头的红点 / 橙点）。
@@ -1757,7 +1973,8 @@ final class DayPanelController {
         // 网页按 `day` 取，**永远不会串到别的日子**。
         var festivalJSON: [String: Any] = [:]
         for (day, f) in festivalByDay {
-            festivalJSON["\(day)"] = DayPanelContent.festivalJSON(f)
+            festivalJSON["\(day)"] = DayPanelContent.festivalJSON(
+                f, weatherEnabled: settings.weatherEnabled, region: weatherRegion)
         }
         let panelJSON: Any
         if let override = dayPanelOverride {
@@ -1768,6 +1985,15 @@ final class DayPanelController {
             panelJSON = c.jsonObject
         } else {
             panelJSON = NSNull()
+        }
+        // ⚠️ 诊断：打印 dayFestivals 的键 → 农历（查网页侧错位）。
+        if ProcessInfo.processInfo.environment["DT_DEBUG_WEATHER"] == "1" {
+            var keysDesc = ""
+            for (k, v) in festivalJSON.sorted(by: { $0.key < $1.key }) {
+                let dict = v as? [String: Any]
+                keysDesc += "\(k)=\(dict?["lunar"] as? String ?? "?") "
+            }
+            DiagLog.info("天气：推送的 dayFestivals 键 → 农历：\(keysDesc)")
         }
         var payload: [String: Any] = [
             "dayPanel": panelJSON,
@@ -1782,6 +2008,13 @@ final class DayPanelController {
             let pushedDay = (panel["day"] as? Int)
                 ?? (panel["day"] as? NSNumber)?.intValue
             if let pushedDay { pushedPanelsByDay[pushedDay] = panel }
+        }
+        // ⚠️ 诊断：把真正推给网页的 JSON dump 出来（查键错位）。
+        if ProcessInfo.processInfo.environment["DT_DEBUG_WEATHER"] == "1" {
+            if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+               let txt = String(data: data, encoding: .utf8) {
+                DiagLog.info("天气：推送 JSON（截断 1500 字）=\(String(txt.prefix(1500)))")
+            }
         }
         guard let onStateChange else { return }
         // ⚠️ **内容没变就不要重推**（2026-11 修「闪几下」）。
@@ -1830,7 +2063,8 @@ final class DayPanelController {
     func currentFestivalsJSON() -> [String: Any] {
         var out: [String: Any] = [:]
         for (day, f) in festivalByDay {
-            out["\(day)"] = DayPanelContent.festivalJSON(f)
+            out["\(day)"] = DayPanelContent.festivalJSON(
+            f, weatherEnabled: settings.weatherEnabled, region: weatherRegion)
         }
         return out
     }
@@ -1842,6 +2076,12 @@ final class DayPanelController {
 
     /// 自检用：表头标记。
     var testFlags: [Int: DayPanelFlags] { flags }
+
+    /// 自检用：今天在周几（跨天刷新后要跟着变）。
+    var testTodayIndex: Int { todayIndex }
+
+    /// 自检用：有没有接上天气数据源（生产环境必须为 true）。
+    var hasWeatherProvider: Bool { weatherProvider != nil }
 
     /// 自检用：当前内容。
     var testContent: DayPanelContent { content }

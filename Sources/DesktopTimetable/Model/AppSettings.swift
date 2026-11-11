@@ -52,13 +52,13 @@ struct AppearanceSettings: Equatable {
     var fadeOutSec: Double = 6.0
     var minOpacity: Double = 0.22
     var maxOpacity: Double = 1.0
-    var panelOpacity: Double = 1.0
+    var panelOpacity: Double = 0.5
     /// 课表卡片大小（等比缩放系数）。1.0 = 原始尺寸。
     var cardScale: Double = 1.0
 
     init(fadeInSec: Double = 0.8, fadeOutSec: Double = 6.0,
          minOpacity: Double = 0.22, maxOpacity: Double = 1.0,
-         panelOpacity: Double = 1.0, cardScale: Double = 1.0) {
+         panelOpacity: Double = 0.5, cardScale: Double = 1.0) {
         self.fadeInSec = fadeInSec
         self.fadeOutSec = fadeOutSec
         self.minOpacity = minOpacity
@@ -73,7 +73,7 @@ struct AppearanceSettings: Equatable {
         fadeOutSec = dictionary["fadeOutSec"] ?? 6.0
         minOpacity = dictionary["minOpacity"] ?? 0.22
         maxOpacity = dictionary["maxOpacity"] ?? 1.0
-        panelOpacity = dictionary["panelOpacity"] ?? 1.0
+        panelOpacity = dictionary["panelOpacity"] ?? 0.5
         // 老配置没有这一项 → 1.0（原始尺寸）。
         cardScale = dictionary["cardScale"] ?? 1.0
     }

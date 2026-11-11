@@ -143,6 +143,14 @@ final class SliderRow: NSView {
     private var suppressCallback = false
     /// 用户是否正在拖动滑杆（用于区分「拖动结束」和「普通改值」）。
     private var isDragging = false
+    /// **中点在正中间的映射**（2026-11-10）。
+    ///
+    /// 面板不透明度是「20% ~ 100%」，线性映射时 50% 的滑块会落在 37.5% 处 ——
+    /// 用户看到的是「明明写着 50%，滑块却在偏左」。这里把它做成**分段线性**：
+    /// 20% → 0、**50% → 正中**、100% → 1，两边各占半条轨道。
+    private var midpoint: Double?
+    private var lo: Double = 0
+    private var hi: Double = 1
 
     init(title: String,
          subtitle: String,
@@ -151,6 +159,7 @@ final class SliderRow: NSView {
          value: Double,
          step: Double = 0,
          decimals: Int = 1,
+         midpoint: Double? = nil,
          format: @escaping (Double) -> String) {
         super.init(frame: .zero)
         wantsLayer = true
@@ -168,9 +177,13 @@ final class SliderRow: NSView {
                 .font: NSFont.systemFont(ofSize: 10.5),
             ])
 
-        slider.minValue = lo
-        slider.maxValue = hi
-        slider.doubleValue = value
+        self.lo = lo
+        self.hi = hi
+        self.midpoint = midpoint
+        // 有中点映射时，滑杆本身跑 0…1（位置），值由 `valueFromPosition` 换算。
+        slider.minValue = midpoint == nil ? lo : 0
+        slider.maxValue = midpoint == nil ? hi : 1
+        slider.doubleValue = positionFromValue(value)
         slider.isContinuous = true
         slider.target = self
         slider.action = #selector(sliderMoved)
@@ -185,7 +198,7 @@ final class SliderRow: NSView {
         slider.onMouseUp = { [weak self] in
             guard let self, self.isDragging else { return }
             self.isDragging = false
-            self.onDragEnd?(self.slider.doubleValue)
+            self.onDragEnd?(self.valueFromPosition(self.slider.doubleValue))
         }
 
         valueLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
@@ -240,6 +253,36 @@ final class SliderRow: NSView {
         ])
     }
 
+    /// 滑杆位置（0…1）→ 真实值（**纯函数**，方便单测）。
+    ///
+    /// `midpoint == nil` 时就是线性（位置即值）。
+    static func value(fromPosition p: Double, lo: Double, hi: Double,
+                      midpoint: Double?) -> Double {
+        guard let mid = midpoint else { return p }
+        if p <= 0.5 {
+            return mid == lo ? lo : lo + (mid - lo) * (p / 0.5)
+        }
+        return mid + (hi - mid) * ((p - 0.5) / 0.5)
+    }
+
+    /// 真实值 → 滑杆位置（0…1）。
+    static func position(fromValue v: Double, lo: Double, hi: Double,
+                         midpoint: Double?) -> Double {
+        guard let mid = midpoint else { return v }
+        if v <= mid {
+            return mid == lo ? 0 : 0.5 * (v - lo) / (mid - lo)
+        }
+        return hi == mid ? 1 : 0.5 + 0.5 * (v - mid) / (hi - mid)
+    }
+
+    private func valueFromPosition(_ p: Double) -> Double {
+        Self.value(fromPosition: p, lo: lo, hi: hi, midpoint: midpoint)
+    }
+
+    private func positionFromValue(_ v: Double) -> Double {
+        Self.position(fromValue: v, lo: lo, hi: hi, midpoint: midpoint)
+    }
+
     // 小的圆形步进按钮（◀ / ▶），点一次走一个 step
     private func makeStepButton(_ title: String, _ action: Selector) -> NSButton {
         let b = NSButton(title: "", target: self, action: action)
@@ -266,10 +309,10 @@ final class SliderRow: NSView {
     private func commit(direction: Double) {
         guard step > 0 else { return }
         let factor = pow(10.0, Double(decimals))
-        let base = ((slider.doubleValue) * factor).rounded() / factor
+        let base = (valueFromPosition(slider.doubleValue) * factor).rounded() / factor
         let next = ((base + direction * step) * factor).rounded() / factor
-        let clamped = clamp(next, slider.minValue, slider.maxValue)
-        slider.doubleValue = clamped
+        let clamped = clamp(next, lo, hi)
+        slider.doubleValue = positionFromValue(clamped)
         valueLabel.stringValue = format(clamped)
         onChange?(clamped)
         // 点 ◀/▶ 不是拖动 —— 但对「拖动中不写盘」的需求来说，
@@ -280,9 +323,10 @@ final class SliderRow: NSView {
     }
 
     @objc private func sliderMoved() {
-        valueLabel.stringValue = format(slider.doubleValue)
+        let v = valueFromPosition(slider.doubleValue)
+        valueLabel.stringValue = format(v)
         if suppressCallback { return }
-        onChange?(slider.doubleValue)
+        onChange?(v)
     }
 
     @objc private func stepDown() { commit(direction: -1) }
@@ -291,7 +335,7 @@ final class SliderRow: NSView {
     /// 程序化设值（不触发 onChange）
     func setValue(_ v: Double) {
         suppressCallback = true
-        slider.doubleValue = v
+        slider.doubleValue = positionFromValue(v)
         valueLabel.stringValue = format(v)
         suppressCallback = false
     }
@@ -302,10 +346,11 @@ final class SliderRow: NSView {
     /// 写死 115% 的话，滑杆顶部一段是「拖了也不动」的死区 ——
     /// 用户会感觉拖不动 / 卡住，而且显示的百分比和实际大小对不上。
     func setMaxValue(_ v: Double) {
-        slider.maxValue = max(v, slider.minValue)
-        if slider.doubleValue > slider.maxValue {
-            setValue(slider.maxValue)
+        hi = max(v, lo)
+        if midpoint == nil {
+            slider.maxValue = hi
         }
+        if value > hi { setValue(hi) }
     }
 
     /// 改副标题文案（范围说明）。
@@ -320,7 +365,7 @@ final class SliderRow: NSView {
 
     /// 当前值
     var value: Double {
-        get { slider.doubleValue }
+        get { valueFromPosition(slider.doubleValue) }
         set { setValue(newValue) }
     }
 

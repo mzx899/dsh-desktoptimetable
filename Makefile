@@ -4,7 +4,7 @@ APP_NAME    := DesktopTimetable
 ## 按小版本惯例**不换** bundle id —— 和 1.2.0 ~ 1.2.7 是同一个 App，
 ## 日历 / 提醒事项授权、登录项、通知身份全部延续，不用重新登记。
 BUNDLE_ID   := com.desktoptimetable.app.v120
-VERSION     := 1.5.3
+VERSION     := 1.5.9
 BUILD_DIR   := build
 APP_BUNDLE  := $(BUILD_DIR)/$(APP_NAME).app
 ## 根目录入口的名字带版本号，好和旁边的旧版并存：

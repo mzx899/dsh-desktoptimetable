@@ -1435,19 +1435,56 @@
   color: rgba(245, 178, 77, 0.95);
 }
 
-/* 天气行（拿不到时整行不存在）。 */
-.dpweather {
-  display: flex; align-items: center; gap: 5px;
-  font-size: 10px;
-  color: rgba(238, 241, 247, 0.66);
+/* 天气块 —— 像天气软件那样**一整块带边框**（2026-11-10 用户要求）：
+   第一行「图标 + 现象」，当前温度右对齐（**只有当天有**，原生只给今天 current）；
+   第二行「最低 / 最高」。 */
+.dpwbox {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 5px 7px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+  font-size: 11px;
+  color: rgba(238, 241, 247, 0.86);
   letter-spacing: 0.2px;
+  max-width: 100%;
+  box-sizing: border-box;
 }
-.dpwicon { font-size: 11px; line-height: 1; opacity: 0.9; }
-.dpwdesc { color: rgba(238, 241, 247, 0.72); }
-.dpwtemp {
-  color: rgba(147, 197, 253, 0.95);
+.dpwtop {
+  display: flex; align-items: baseline; gap: 4px;
+  min-width: 0;
+}
+.dpwtop-col { flex-direction: column; align-items: flex-start; gap: 1px; }
+.dpwicon { font-size: 11px; line-height: 1; opacity: 0.95; }
+.dpwdesc { color: rgba(238, 241, 247, 0.92); }
+/* 当前温度（只在当天）：右对齐、加粗、偏蓝。 */
+.dpwnow {
+  margin-left: auto;
+  color: rgba(170, 210, 255, 1);
+  font-size: 13px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
+  line-height: 1.1;
 }
+/* 最低 / 最高那一行。 */
+.dpwrange {
+  display: flex; align-items: baseline; gap: 6px;
+  /* 每段都不许折行 —— 一折就会变成「最低」/「-5°」两行，很难看。 */
+  white-space: nowrap;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: rgba(238, 241, 247, 0.55);
+}
+.dpwrange > span { white-space: nowrap; }
+.dpwlow { color: rgba(150, 200, 255, 0.85); }
+.dpwhigh { color: rgba(255, 190, 140, 0.9); }
+/* 空态（没选地区 / 没拿到数据）：边框和文字都淡一点，但仍在同一个块里。 */
+.dpwbox-empty {
+  border-color: rgba(255, 255, 255, 0.10);
+  background: transparent;
+  color: rgba(238, 241, 247, 0.58);
+}
+.dpwbox-empty .dpwdesc { color: rgba(238, 241, 247, 0.58); }
 
 /* 宜 / 忌行。 */
 .dpyiji {
@@ -1682,8 +1719,10 @@ input.dptimepart:focus {
 .dpscroll {
   overflow-y: auto;
   overflow-x: hidden;
-  -webkit-user-select: text;
-  user-select: text;
+  /* 面板里的文字**不可框选**（2026-11-11 用户要求：和课表一致）。
+     输入框自己那条规则里是 `user-select: text`，所以照样能打字 / 选中文字。 */
+  -webkit-user-select: none;
+  user-select: none;
 }
 .dpscroll::-webkit-scrollbar { width: 4px; }
 .dpscroll::-webkit-scrollbar-thumb {
@@ -1709,9 +1748,12 @@ input.dptimepart:focus {
 .dpbody.narrow.scroll {
   overflow-y: auto !important;
   overflow-x: hidden;
-  /* 滚动时别让文本被选中（拖滚动条会拖出一片选区）。 */
-  -webkit-user-select: text;
-  user-select: text;
+  /* ⚠️ **面板里的文字不可框选**（2026-11-11 用户第二次反馈）。
+     这里原来写的是 `user-select: text`（理由是「拖滚动条会拖出选区」），
+     结果整个面板都能被鼠标拖选。改成 none；真正需要选中的输入框
+     在各自的规则里仍然是 `user-select: text`。 */
+  -webkit-user-select: none;
+  user-select: none;
 }
 .dpbody.scroll::-webkit-scrollbar { width: 4px; }
 .dpbody.scroll::-webkit-scrollbar-thumb {

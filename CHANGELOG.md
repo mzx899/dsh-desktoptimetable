@@ -1,5 +1,580 @@
 # 更新日志 · Changelog
 
+## [未发布]
+
+### 不透明度滑杆 50% 居中 + 面板文字不可框选 + 地区列表再让开滚动条
+
+用户原话（2026-11-11 凌晨）：
+
+> 「拖动条要不再往右边去一点儿，这还是有点儿压住了，把这个面板不透明度的 50% 设为中间的值，
+> 就是最小还是 20% 不变，但是在 50% 的时候，这个拖动条白色是在中间的位置，而且把默认值就改为
+> 50%，然后就是这个日历的这一列文字，不可以框选，就是和课表的设定一样，不可框选输入除外」
+
+#### 1）面板不透明度：50% 落在轨道正中、默认改 50%
+
+- 滑杆原来是线性映射（20…100），50% 会落在 **37.5%** 处，看着像「写着 50 却在偏左」。
+  现在 `SliderRow` 支持 `midpoint`：**20%→0、50%→0.5、100%→1**，两边各占半条轨道；
+- 默认值 1.0 → **0.5**（三处都改了：`AppearanceConfig` / `AppSettings` / `ScheduleStore` 的默认配置）；
+- 副标题改成「50% 在正中间（默认）· 20% 最透 · 100% 实心不透」。
+- 自检：正/反解 6 条（`SliderRow.value(fromPosition:)` / `position(fromValue:)`）。
+
+#### 2）地区列表再让开滚动条
+
+留白 14 → **22pt**（用户反馈还压住一点）。
+
+#### 3）日期覆盖层的文字不可框选
+
+`.dpscroll` 原来写着 `user-select: text`，所以面板里能被鼠标拖选。改成 `none`；
+各个输入框自己的 `user-select: text` 规则不变，照样能打字 / 选中输入内容。
+
+#### 5）日记可以改日期
+
+`DiaryEditorDialog` 加一行「日期」（默认今天 / 编辑时是这篇原来的日期），
+`Result` 带上 `date`；保存时 `DiaryStore.add(date:)` / `update(..., date:)` 都用它。
+日期写法宽松（`2026/11/11` / `20261111` 都行），**非法值退回原日期**，绝不写坏日期。
+自检：归一化 5 条 + 「改完日期后原来那天查不到、新日期能查到」。
+
+#### 6）去掉待办时间的「填满两位自动跳栏」
+
+`Timetable.js` 里时 / 分框原来填满两位就 `focusTimePart(...)` 跳到另一栏 ——
+用户接着输入就串到别的栏去了。现在**不再自动跳**（粘贴整串 `20:00` 也不跳）；
+要换栏请用 ←/→ 或 Tab（那是用户主动按的）。
+
+#### 4）设置面板「第一次打开在左下角」
+
+**排查方法**：给 `SettingsWindowController.positionWindow` 加了 `DT_POS_LOG=1` 日志，
+再用 `DT_OPEN_SETTINGS=1` 让 app 启动后自动开两次面板（不用人手点）。实测日志：
+
+```
+anchor=(755.5, 522.5) size=(580.0, 152.0) before=(0.0, 54.0)  after=(465.0, 446.0)   ← 第 1 次
+anchor=(755.5, 522.5) size=(580.0, 152.0) before=(465.0, 446.0) after=(465.0, 446.0)  ← 第 2 次
+```
+
+**根因**：新窗口建出来时 origin 是 `(0, 54)`（屏幕**左下角**，正好在程序坞上方），
+而 `show()` 里 `reload / syncUI / resetToHome / refreshDayPanelRows` 全跑完才轮到
+`positionWindow`。首次打开时窗口在这几帧里就被合成上屏 → 用户看到「先在左下角、再跳到中间」；
+第二次打开时窗口本来就在正确位置，所以「后面就正常了」。
+
+**修**：`show()` 建完窗口**立刻** `positionWindow` 一次（纯几何），后面那次保留，
+按 `resetToHome` 之后的最终尺寸再校准。日志里第 1 次 `before` 仍是 (0, 54)（建窗那一刻），
+但紧接着就被摆到锚点，不再有可见帧。
+
+#### 已知未修（需要专门一轮 spike）
+
+- **缩放在 100% 附近有一下大小突变**：`WebCardRenderer` 在 `viewScale >= 1` 时切到
+  `pageZoom`、以下用 CSS transform，两种模式的排版 / 取整不同，临界点会跳一下。
+  按项目约定「改缩放 / pageZoom 前先做小时级 spike」，本轮没动。
+- **缩放时卡片边缘的透明羽化层闪烁**（颜色在「偏白 / 更透」之间来回）：
+  `NSVisualEffectView`（behindWindow 毛玻璃）+ 网页羽化层是两层，拖动帧里两者不是同一帧更新。
+
+#### 7）「第一次打开在左下角」—— 第二次定位（用户复现后）
+
+上一轮只把摆位提前了，用户实测**仍然在左下角**。这次补三处：
+
+- `window.isRestorable = false`（+ `restorationClass = nil`）：系统会把窗口框存进
+  app 恢复状态，下次 `makeKeyAndOrderFront` 时再「恢复」回来 —— 我们摆好的位置被覆盖，
+  而且**只在首次打开**发生（同一会话第二次不再恢复）；
+- `makeKeyAndOrderFront` **之后**在下一轮 runloop 再摆一次（防止系统在 orderFront 期间动窗口）；
+- `windowDidBecomeKey` 兜底：面板中心离锚点 **> 200pt** 就重新摆一次
+  （只纠正「明显跑偏」，正常拖动不受影响）。
+
+#### 8）「文字还是能框选」—— 定位到真正的那条规则
+
+上一轮改的是 `.dpscroll`，但面板正文的容器其实是 **`.dpbody.narrow.scroll`**，
+它自己写着 `user-select: text`（注释理由是「拖滚动条会拖出选区」），于是整列仍能拖选。
+改成 `none`；输入框（`.dptimepart` / `.dpedittitle` / 日记框）各自仍是 `text`。
+
+自检：`--verify-web-render` 里**用真实 WKWebView** 打开日期覆盖层，读 `.dpbody` 的
+计算样式 —— 实测 `webkitUserSelect = none`；另加一条 CSS 静态体检（禁止再出现
+`user-select: text;` 声明）。
+
+#### 9）「第一次打开在左下角」—— 第三次定位：**真正的根因**（本轮）
+
+用户原话（2026-11-11 上午）：
+
+> 「修复第一次打开设置设置出现的位置在左下角的问题」
+
+前两轮（条目 4 / 7）改的都不是真凶：把摆位提前了、也加了兜底，但用户**仍然复现**。
+这次用 `DT_POS_LOG=1` + `DT_OPEN_SETTINGS=1` 把「上屏那一刻」的 frame 打了出来：
+
+```
+PROBE buildWindow.orderFront       frame=(0.0, 54.0, 580.0, 152.0) visible=false
+PROBE buildWindow.afterOrderFront  frame=(0.0, 54.0, 580.0, 152.0) visible=true
+anchor=(755.5, 522.5) size=(580.0, 152.0) before=(0.0, 54.0) after=(465.0, 446.0)
+```
+
+##### 根因
+
+`SettingsWindowController.buildWindow()` 的**最后两行**是：
+
+```swift
+window.makeKeyAndOrderFront(nil)
+window.orderFrontRegardless()
+```
+
+新窗口建出来时 origin 是 **(0, 54)**（屏幕左下角，正好在程序坞上方），
+而**这两行把窗口直接摆到了前面** —— 面板以左下角的姿态**上屏了至少一帧**，
+之后 `show()` 里的 `positionWindow` 才把它摆正。用户看到的就是
+「先在左下角闪一下、再跳到中间」。
+
+**第二次打开之所以正常**：`buildWindow()` 不再跑，窗口早已在正确位置。
+
+##### 修
+
+1. **上屏之前先摆位**：`buildWindow()` 里 `orderFront` **之前**调一次
+   `positionWindow(mouse: nil)`（纯几何，很便宜）——
+   窗口第一次被合成上屏时就已经在锚点上了，不再有可见帧；
+   `show()` 里那次保留（按 `resetToHome` 之后的最终尺寸再校准）。
+2. **修掉一条自引用锚点**（顺带发现）：`WindowAnchor.provider` 有一条规则 ——
+   「设置面板是 key 时锚点取**设置面板自己**的中心」。
+   于是面板一旦拿到 key，`provider()` 返回的就是它自己的中心 →
+   - `positionWindow` 再怎么调都不会动（自己跟自己比）；
+   - 上一轮加的 `windowDidBecomeKey` 兜底**恒为 0，永远不触发**（是死代码）。
+
+   现在面板自己的落点基准改走新的 `cardAnchor()` ——
+   一条**只认课表卡片中心**的取值器（`AppDelegate` 在 `buildSettingsController()`
+   里接线；那里 `settingsController` 才存在，早前的 `installWindowAnchor()` 调用时它还是 nil）。
+   `windowDidBecomeKey` 的兜底也改用它 —— 现在它是**活的**了。
+
+##### 自检
+
+新增 `--verify-settings-first-open`：记下「**上屏那一刻**」的 frame
+（`testFirstVisibleFrame`，在 `orderFront` **之前**记 —— 之后就看不出问题了），
+断言：
+
+1. 第一次上屏时面板中心贴着锚点（容差 2pt）；
+2. 第一次上屏时**不落在屏幕左下角**（离左边缘 < 40pt 且离下边缘 < 40pt）；
+3. 整个窗口在屏幕可见区内；
+4. 关掉再打开位置不漂。
+
+**验证过它真的能抓到这个 bug**：临时把 `positionWindow` 挪回 `orderFront` 之后，
+自检立刻报 `frame=(0.0, 54.0, ...)`、`偏离锚点 466×371pt`、`落在屏幕左下角`；
+恢复修复后 → `frame=(466.0, 425.0, ...)`、`✅ 通过`。
+
+`make test` **2220** 项全绿；`--verify-panel-sections` 的 3 条既有失败
+（首页 5 个板块 vs 断言 4 个 / 砖块文字越界 / 卡片 13≠11）与本轮无关（位置类断言全过）；
+`--verify-panel-animation` 在这台机器上**一直红**（无头环境合成器不推进动画，属既有环境限制）。
+
+## [1.5.9] - 2026-11-10
+### 地区列表圆角 / 11 个城市解析不到 / 弹窗跟设置居中 / 设置不再压着别的 App
+
+用户原话（2026-11-10 深夜）：
+
+> 「这个高亮被滚动条压住，但是右边的圆滑程度和左边不一样……再排查一下有没有其他的地址解析错误，
+> 然后再是一个设置的问题，设置点开了之后，再点击日记，然后点新建。在课表收缩的情况下，
+> 写日记的这个窗口就会显示在折叠的课表的中间。把这个判定改为在设置里面弹出来的窗口，
+> 显示的应该是这个设置的中心点，最后就是一个显示层级的问题……把它的层级降低」
+
+#### 1）地区列表的圆角左右不一致
+
+行原来是 `cornerRadius = 6`，窄行里几乎看不出圆角，右端又紧挨滚动条，看着像直角。
+现在 **半径 10 + 内容右侧留 14pt 给滚动条**，左右两端的圆角一致。
+
+#### 2）地址解析自查：11 个城市解析不到
+
+把 `WeatherCityCatalog` 的 **159 个城市**串行过了一遍 `resolveCity`（并发会被地名服务限流，
+第一版脚本因此误报 100 多个）：
+
+- **8 个搜不到**：运城 / 连云港 / 宿迁 / 湖州 / 许昌 / 商丘 / 益阳 / 石嘴山
+  —— 地名库里连「名字 + 市」都没有；
+- **3 个被「只认中国」筛掉**：香港 / 澳门 / 台北（`country_code` 是 HK / MO / TW）。
+
+修：
+
+- `WeatherCityCatalog.knownCoordinates` 内置这 11 个坐标；`loadWeather` 里**坐标表优先**，
+  命中就不查地名服务；
+- `pickChineseResult` 放行 HK / MO / TW，`country` 里含「香港 / 澳门 / 台湾」也认。
+
+**复查**：159 个城市 **0 异常**。
+
+#### 3）从设置里弹的窗口要跟设置窗口居中
+
+`WindowAnchor.provider` 原来一律给课表卡片中心 —— 课表折叠时，写日记的窗口会落在
+折叠条的中间。现在：**设置面板可见且是 key window 时，锚点取设置面板中心**；否则仍取课表卡片中心。
+
+#### 4）设置 / 弹窗不再压着别的 App
+
+这些窗口原来硬编码 `.floating`，于是「课表设置开着去用别的软件，设置还浮在人家上面」。
+新增 `WindowLevelPolicy`：
+
+- 本 App 是前台 → `.floating`（否则点齿轮打开设置时窗口会掉到别的 App 后面）；
+- 前台换成别的 App（`NSWorkspace.didActivateApplicationNotification`）→ 降回 `.normal`；
+- 课表卡片（桌面层）不参与。
+
+#### 自检
+
+- `make test` → **2197 项断言全过**（新增：11 个内置坐标、港澳台 country_code、
+  窗口层级 3 条）；
+- `--verify-day-panel` → ✅；`--verify-day-panel-click` → ✅（首次跑恰好撞上自查脚本占满网络，
+  重跑 2/2 通过）；
+- 出图：`--shot-city-picker … "" 北京` → 左右圆角一致、右侧不再被滚动条压。
+
+### 版本
+
+**1.5.9** —— 补丁版，**bundle id 不变**（仍为 `com.desktoptimetable.app.v120`）。
+构建已归档到 `版本迭代/DesktopTimetable-1.5.9.app`。
+
+## [1.5.8] - 2026-11-10
+### 天气独立成板块（面板 + 设置）+ 地区选择器点得动了 + 日记时间给引导 + 表头 tooltip 去掉
+
+用户原话（2026-11-10 晚）：
+
+> 「左上角的红绿灯和选择地区重合了，把文字往下放一点，然后城市现在无法点击选中，变成点击后
+> 就是该城市，把天气和提醒待办事项分开做成下面独立一个天气板块；再就是日记这个时间给引导，
+> 不然不知道怎么填写，月天给单独的空；最后是出来的文本弹窗，只有在要给用户操作引导的时候
+> 才会停留后弹出来，这种一目了然的就不要弹出来」
+> 追加：「在设置里面也把天气和提醒待办事项分开做成下面独立一个天气板块」
+
+#### 1）选择器标题和红绿灯撞在一起
+
+`HUDWindow` 是 `fullSizeContentView`，左上角三个红绿灯是**压在内容上**的。
+标题原来距顶 18pt → 改成 **34pt**。
+
+#### 2）城市点不动 / 要双击才确认
+
+**两个根因**：
+
+- `CityPickerRow` 里的城市名 label / 打勾图标是子视图，会把点击吃在自己身上；
+  `NSButton` 的默认 `hitTest` 命中子视图后不再把事件转回按钮 → **点不动**；
+- 只靠 NSButton 的 `mouseUp` 触发 action：窗口不在前台 / 列表在滚动视图里时，
+  第一下点击只把行点亮（变白），要第二下才结算 → **「单击只是选择，双击才确认」**。
+
+**修**（用户澄清后的最终交互）：
+
+- **单击 = 选中**：那一条高亮（浅底 + 描边 + ✓），**不关窗**；
+- **双击 = 确认**：关窗，地区就是它；
+- 实现：行自己处理 `mouseDown`（`clickCount >= 2` → 确认，否则选中），
+  整行接管 `hitTest`（子视图不吃点击），`acceptsFirstMouse = true`；
+- 自检：`simulateClickForTest` 验「单击只高亮、不确认」「双击确认」；
+  `hitTest(中心点 / 城市名处)` 都必须 === 该行。
+
+> 过程记录：我一开始把「单击即确认」当成需求实现了，用户指出理解反了 ——
+> 「双击才能确认那个城市，单击只是选择（那一条变白）」。现在按这个来。
+
+顺带：**搜索时只列城市名**，不再插「热门城市」/ A–Z 分组标题。
+
+#### 3）天气独立成「天气」板块（两处）
+
+- **日期覆盖层面板**：天气从「今日详情」卡里搬出来，单独一张 `🌤 天气` 卡（`dpWeatherSection`），
+  排在最后；「今日详情」只剩农历 / 节气 / 节日 / 宜忌。
+- **设置面板**：新增 `WeatherSettingsCard`（标题「天气」），「显示天气」+「地区」两行搬过去，
+  放在「日期覆盖层」卡下面；`probeDayPanelCard` 的天气字段改从新卡读。
+
+#### 4）日记：双击条目直接编辑 + 时间给引导
+
+- 「时间」输入拆成 **时 / 分两个小框**（占位 `20` / `30`，中间冒号）；
+- 下面加一行说明：`时间可空：填「时」和「分」（如 20:30）；日期就是这一列那天`；
+- 窗口高度 +16pt（多这行提示）。
+- **双击列表里的一行 → 直接打开这一篇的编辑窗口**（原来要「单击选中 → 点编辑」）；
+  列表底部说明同步改成「双击一行直接编辑，单击选中后可点删除」；`DiaryRowView`
+  加 `onDoubleClick` + `acceptsFirstMouse`；`editDiaryEntry` 拆出 `openDiaryEditor(id:)`。
+- 出图入口：`--shot-diary-editor <out.png>`（`DiaryEditorDialog` 拆出了 `buildWindowForTest`）。
+
+#### 5）去掉「一目了然」的表头 tooltip
+
+表头格子上原来挂 `title="周四 12"` —— 表头本来就写着「周四 / 12」，再弹一个一模一样的框
+纯属噪音（用户截图指出「出来的文本弹窗……一目了然的就不要弹出来」）。已删。
+
+#### 6）「宜昌」被解析成台湾的宜昌（用户实测：显示 20° / 雾）
+
+**现象**：用户把地区选成「宜昌」，面板显示 **20° / 雾 / 16~23°**；而中国天气网宜昌是
+**多云 9~16°**。
+
+**根因**：Open-Meteo 地名搜索里，「宜昌」的第一条结果是**台湾**的宜昌
+（23.97, 121.58）；湖北那个在库里叫「**宜昌市**」（30.71, 111.28）。
+
+**修**：
+
+- `resolveCity` 不再直接取第一条：先取**中国**的结果（`country` 含「中国」或
+  `country_code == CN`，多条时人口多的优先）；一条中国结果都没有，
+  再用「名字 + 市」重查一次；
+- 顺带：**换地区必须清掉旧地区的天气**（`updateSettings` 里检测 `weatherCity` 变化 →
+  清 `weatherByDate` / `festivalByDay[*].weather` → 重新取）。不清的话换城市后
+  面板会先显示上一个城市的温度。
+
+**实测（修好后）**：宜昌 → 30.71444, 111.28472（湖北）；今天 雾 现在 11° 最低 10° 最高 17°，
+中国天气网 9~16°。
+
+#### 7）选择器高亮被滚动条压住
+
+列表原来铺满整宽，overlay 滚动条压在最后十几像素上。现在内容右侧留 **14pt** 给滚动条。
+
+#### 自检
+
+- `make test` → **2181 项断言全过**（城市行 hitTest 两条 + 单击只高亮 / 双击确认各一条 +
+  地名优先中国两条 + 换地区清旧数据一条）；
+- `--verify-day-panel` → ✅（卡片数按「多一张天气卡」更新：8→9、34→35）；
+- `--verify-day-panel-click` → ✅；
+- 出图：`--shot-day-panel … day 2 weather`（天气独立卡）/ `--shot-city-picker`（标题不再压红绿灯）/
+  `--shot-diary-editor`（时 / 分 + 引导）/ `--verify-panel-sections`（设置里「天气」独立卡）。
+- ⚠️ `--verify-panel-sections` 的 3 条失败仍是**既有**问题。
+
+### 版本
+
+**1.5.8** —— 补丁版，**bundle id 不变**（仍为 `com.desktoptimetable.app.v120`）。
+构建已归档到 `版本迭代/DesktopTimetable-1.5.8.app`。
+
+## [1.5.7] - 2026-11-10
+### 天气第二轮：切列不再丢天气 + 改成像天气软件的一块 + 地区选择器
+
+用户原话（2026-11-10 晚）：
+
+> 「这个天气加上边框，然后标上最高温最低温，当前温度（只在当天显示），像天气软件那样，
+> 现在移动到别的列之后天气显示又没有了，还有查找城市的那个功能把城市的选项加上按照前面是热门城市
+> 后面按照首字母排序，输入框做的更美观」
+
+#### 1）切到别的列、再切回当天，天气就没了
+
+**根因（两处叠加）**：
+
+- 请求只取 `forecast_days=7`（**今天起** 7 天），而面板 7 列是「本周一到周日」——
+  今天之前的列全落在窗口外，一换列就是「暂无数据」；
+- `refreshFestivalCache()` 每次开列都把 `festivalByDay` **整份重算**，而天气是异步贴进去的
+  → 被抹掉。面板先闪一版「暂无数据」，再等一次网络 / 缓存回包才回来；
+  回包一慢（或撞上「已有请求在飞」被合并）就一直不回来。
+
+**修复**：
+
+- 请求带 `past_days=7&forecast_days=16`（实测返回 23 天，覆盖本周 + 下周）；
+- 天气按**日期**存进 `weatherByDate`，`refreshFestivalCache()` 重算时按日期贴回去
+  （按日期而不是「周几」——翻周后同一个下标是另一天，按周几会把上周的天气串过来）；
+- `loadContent` 的 reset 段**不再清** `content.festival.weather`（它已经是那一天自己的那份）。
+
+#### 2）天气显示：一整块带边框，像天气软件
+
+- 一块带 1px 描边 / 8pt 圆角的容器（`.dpwbox`）；
+- 第一行：图标 + 现象，**当前温度右对齐（只有当天有）** —— 原生只给今天那一条 `current`；
+- 第二行：「低 -5° 高 6°」（蓝 / 橙两色，tabular-nums）。
+
+#### 3）地区改成**选**：热门城市 + 拼音首字母 + 搜索
+
+- 新增 `Model/WeatherCityCatalog.swift`：20 个热门城市 + 100 余个城市；
+  拼音首字母用 `CFStringTransform` **现算**（不写死表），搜索支持中文名 / 拼音（去空格连写）；
+- 新增 `UI/CityPickerDialog.swift`：HUD 弹窗，标题 + 搜索框 + 「热门城市」段 + A–Z 段，
+  当前城市打 ✓，Esc 取消；
+- 设置里「地区」从裸输入框改成**可点的一行**（和「提醒事项清单」同一观感：
+  左标题、右当前值 + 箭头），点开选择器，选中即保存并立刻生效；
+- 出图入口：`--shot-city-picker <out.png> [搜索词]`。
+
+#### 自检
+
+- `make test` → **2169 项断言全过**（新增：地区目录分段 / 拼音首字母 / 中文与拼音搜索 /
+  选择器建窗；以及「切走再切回天气还在」「第 3 列用自己那天的天气」「.dpwbox / .dpwnow / .dpwrange」）；
+- `--verify-day-panel` → ✅；
+- 控制器级复现脚本（临时目录，不碰真实数据）：
+  `打开今天 → 切周一 → 切回今天`，推送序列里**不再出现** `day2=nil`；
+- 出图：
+  - `--shot-day-panel … day 2 weather` → 边框块 + `☀ 晴  2°` + `低 -5° 高 6°`；
+  - `--shot-day-panel … day 1 weather` → 同一天的非今天列**没有**当前温度；
+  - `--shot-city-picker` → 热门城市列表；`… qinhuang` → 只命中秦皇岛并打勾；
+  - `--verify-panel-sections` → 提醒 → 日期覆盖层出现「地区 未选择 ›」。
+- ⚠️ `--verify-panel-sections` 的 3 条失败仍是**既有**问题（归档 1.5.5 / 1.5.6 同样红）。
+
+### 版本
+
+**1.5.7** —— 补丁版，**bundle id 不变**（仍为 `com.desktoptimetable.app.v120`）。
+构建已归档到 `版本迭代/DesktopTimetable-1.5.7.app`。
+
+## [1.5.6] - 2026-11-10
+### 天气：没选地区要提示「请在设置里选择地区」+ 天气/温度分两行加边框 + 地区输入框被裁掉
+
+用户原话（2026-11-10 晚）：
+
+> 「显示天气要是在设置里面没有选地区的话就是显示请在设置里选择地区，设置里面就在提醒的那个
+> 板块做，而且现在天气看得不清晰，把天气和温度分两行然后把天气加上边框」
+
+#### 1）没选地区时显示「暂无数据」→ 改成「请在设置里选择地区」
+
+**根因**：网页只会区分「天气开 / 关」，`weather` 为 null 时一律写「暂无数据」。
+本机定位又被 ad-hoc 签名堵死（见 1.5.5），所以**没填地区 = 永远没有数据 = 永远「暂无数据」**，
+用户根本不知道是自己没设置。
+
+**修复**：
+
+- `DayPanelContent` 增加 `weatherRegion`；`festivalJSON(_:weatherEnabled:region:)` 带上 `region`；
+- `DayPanelController.weatherRegion`（= `settings.weatherCity` 去空白）随 7 天详情一起推；
+- 网页 `dpFestivalSection` 读 `f.region`：
+  `region` 为空 → **「请在设置里选择地区」**；有地区但没数据 → 保持「暂无数据」。
+
+#### 2）天气看不清 → 天气和温度分两行、天气加边框
+
+- 第一行：`☀ 晴` 装进带 1px 描边的小胶囊（`.dpwcond`，底色 rgba 白 6%）；
+- 第二行：温度（`2°（-5° ~ 6°）`，字号 11.5、颜色更亮、tabular-nums）；
+- 字号整体从 10 → 11，颜色 0.66 → 0.82（用户反馈「看不清晰」）；
+- 空态**不放那个「·」占位图标**，并把长提示显式拆两行（「请在设置里」/「选择地区」）——
+  否则在 ~86pt 的列里会从「选/择」中间断字。
+
+#### 3）设置里的「地区」输入框被裁掉（顺带修的）
+
+**根因**：`DayPanelWeatherRow` 里 `statusLabel.bottom == bottom - 2` 和
+`cityField.bottom == bottom - 2` **同时成立**，两条约束互相打架 →
+地区输入框被挤出卡片，只剩底边一条白线（截图里能看到）。所以「设置里选地区」根本点不到。
+
+**修复**：只让地区行定义行高（去掉状态文字那条底边约束），并给输入框最小高度 18pt。
+
+#### 自检
+
+- `make test` → **2130 项断言全过**（新增：没选地区时文案含「请在设置里选择地区」、
+  填了地区时文案带地区名、`region` 空串 / 有值都要进 JSON，共 5 条）；
+- `--verify-day-panel` → ✅（新增「没选地区 → 一行『请在设置里选择地区』」+
+  「没选地区时不能写『暂无数据』」+ 原生侧 `region` 两条）；
+- 出图（`--shot-day-panel`）：
+  - `day 2 noregion` → 边框胶囊里两行「请在设置里 / 选择地区」；
+  - `day 2 weather` → 第一行 `☀ 晴`（带边框）、第二行 `2°（-5° ~ 6°）`；
+  - `--verify-panel-sections --shots` → 提醒 → 日期覆盖层卡片底部出现「地区 [如：秦皇岛]」。
+- ⚠️ `--verify-panel-sections` 自身有 **3 条既有失败**（首页板块 5 个 vs 断言 4 个、
+  砖块文字越界、卡片数 13≠11）—— 用归档的 1.5.5.app 跑同样三条，**不是本轮引入的**。
+
+### 版本
+
+**1.5.6** —— 补丁版，**bundle id 不变**（仍为 `com.desktoptimetable.app.v120`）。
+构建已归档到 `版本迭代/DesktopTimetable-1.5.6.app`。
+
+## [1.5.5] - 2026-11-10
+
+### 天气高低温比苹果天气低 5°：日最低 / 最高改成三模型取中位数
+
+用户原话（2026-11-10 晚）：
+
+> 「现在我苹果默认天气的最低温是 0，最高温是 11」
+
+#### 现象
+
+秦皇岛当天，app 显示「☀ 晴 2°（-5° ~ 6°）」，苹果天气是「0 ~ 11°」、
+中国天气网（`weather.com.cn/weather/101091101.shtml` 的 `hidden_title`）是「-1 ~ 11°」——
+最低 / 最高都低了 5° 左右。
+
+#### 根因
+
+`OpenMeteoWeatherProvider` 的请求没指定 `models`，拿到的是 Open-Meteo 的默认 `best_match`。
+它在**秦皇岛这种沿海城市**挑到的是一条明显偏冷的模型：同一时刻
+ECMWF 给 -3~8、GFS -1~10、UKMO -2~13，而 `best_match` 给 -5~6。
+
+#### 修复
+
+- 请求显式带 `models=best_match,ecmwf_ifs025,gfs_seamless,ukmo_seamless`；
+- 每日**最低 / 最高温**改取 ecmwf / gfs / ukmo 三个模型的**中位数**（`dailyValue`）。
+  用中位数而不是平均值：单个模型会跑飞（实测北京 GFS 的最低温给 5.6°，实际 0°），
+  中位数能把它挡掉；
+- 「现在温度」和天气现象仍取 `best_match`（它的当前温度和 met.no / wttr.in 一致：
+  1.8° vs 1.0° / 2.0°），所以面板里「现在 2°」不变，只是括号里的高低温变准；
+- 请求没带 `models` 时（老响应 / 自检假数据）自动退回不带后缀的数组，行为不变。
+
+#### 自检
+
+同一时刻三个城市对照（参考值取中国天气网 `hidden_title`）：
+
+| 城市 | 参考 | 改前 `best_match` | 改后三模型中位数 |
+|---|---|---|---|
+| 秦皇岛 | -1 / 11 | -5.1 / 5.8 | **-2.1 / 10.4** |
+| 北京 | 0 / 15 | 0.2 / 12.0 | **0.8 / 11.5** |
+| 上海 | 10 / 18 | 6.4 / 13.3 | **9.4 / 14.0** |
+
+- `make test` → **2125 项断言全过**（新增：中位数奇偶 / 多模型解析 / GFS 跑飞挡掉 / 无 models 兜底）；
+- `--verify-day-panel` → ✅；
+- 真机出图 `--shot-day-panel … day 2 weather` → 天气行排版不变（`☀ 晴 2°（-5° ~ 6°）` 是注入的假数据）。
+
+顺带修掉一个挡住编译的问题：`main.swift` 的 `--shot-day-panel … realweather`
+分支里多了两个右括号（`extraneous '}' at top level`），删掉后 `make build` 恢复正常。
+
+#### 遗留
+
+- 白天的**最高温**仍普遍比国内站点低 2–4°（上海改后 14° vs 参考 18°）：数值模型对大城市的
+  热岛效应估得偏低。要完全对齐苹果 / 中国天气网，得换国内数据源（和风 / 心知，免费 key），
+  见「下一轮候选」。
+- **系统定位在本机拿不到**：`make app` 用 `codesign --sign -`（ad-hoc），macOS 对 ad-hoc
+  签名的 app **静默拒绝**定位。最小实验（前台 app + 正规 bundle + ad-hoc 签名）：
+  `requestWhenInUseAuthorization()` 后 2 秒内直接 `denied`，**没有任何弹框**；
+  `security find-identity -v` = 0 个签名身份。所以定位只能靠「手填城市」，
+  真要自动定位得先装代码签名证书。
+- 另外实测 IP 定位在本机不可用：开着代理时出口 IP 在洛杉矶，会显示美国天气。
+
+### 版本
+
+**1.5.5** —— 补丁版，**bundle id 不变**（仍为 `com.desktoptimetable.app.v120`）。
+构建已归档到 `版本迭代/DesktopTimetable-1.5.5.app`。
+
+## [1.5.4] - 2026-11-10
+
+### 天气终于会显示了 + 没数据显示「暂无数据」+ 过 12 点自动更新
+
+用户原话（2026-11-10）：
+
+> 「完成天气功能，要求有数据的显示天气数据，没有的就显示暂无数据，
+> 每天过12点了就更新，理解了吗」
+
+#### 1）开着「显示天气」，面板里永远没有天气
+
+**根因（两处，缺一不可）**：
+
+- **生产路径没注入天气数据源**：`AppDelegate.buildDayPanelController` 建
+  `DayPanelController` 时没传 `weatherProvider:` → `loadWeather` 第一道
+  `guard let provider = weatherProvider` 直接 return。只有自检里手写注入
+  fake provider 的那几条用例能拿到天气，真实 app 永远 nil。
+- **拿到了也会被网页覆盖掉**：`loadWeather` 只写 `content.festival.weather`，
+  但 `pushState` 的 `dayFestivals` 是用 `festivalByDay` 生成的（里面没有天气）；
+  网页 `panelDataFor()` 为了「换列时农历不串天」会用 `dayFestivals[day]`
+  **覆盖** `dayPanel.festival` → 天气又被盖回 null。
+
+**修复**：
+
+- `buildDayPanelController` 注入 `OpenMeteoWeatherProvider()`（自动化模式下它
+  不建 `CLLocationManager`，自检不弹框、不联网）；
+- `loadWeather` 成功后**同时写回 `festivalByDay[day]`**，7 天详情里也带天气；
+- 顺手把 `loadWeather` 里 `if let fake = provider as? OpenMeteoWeatherProvider`
+  这个反了的变量名改成 `real`，并把两条取数路径统一收进一个 `apply` 回调。
+
+#### 2）没有数据时整行消失 → 改成明确显示「暂无数据」
+
+用户要求「没有的就显示暂无数据」。`festival.weather` 为 `null` 时现在分两种：
+
+- `weatherEnabled: true`（功能开着，只是这次没拿到）→ 一行 **「暂无数据」**；
+- `weatherEnabled: false`（功能没开）→ 整行不显示。
+
+`weatherEnabled` 由原生随 `festival` 一起推（`DayPanelContent.weatherEnabled`），
+网页不再靠「null 就隐藏」猜。样式上「暂无数据」比正常天气淡一点（`.dpweather-empty`）。
+
+顺带修了设置里切换「显示天气」不生效：`DayPanelController.updateSettings` 以前只
+`refreshAll()`，已打开的面板不会变。现在关掉立刻清天气并推状态，打开立刻重取。
+
+#### 3）每天过 12 点不更新
+
+**根因**：
+
+- `todayIndex` 是 `let`，建控制器时算一次；开着面板过午夜，「今天」还是昨天；
+- 天气缓存只按经纬度存、30 分钟有效：23:55 取到的「今天」在 00:05 还会命中
+  → 显示**昨天**的最低 / 最高温（Open-Meteo 的 `daily[0]` 是请求那一天）；
+- 没有任何跨天触发器。
+
+**修复**：
+
+- `todayIndex` 改成可更新；新增 `DayPanelController.handleDayChange(now:)`：
+  换 `todayIndex`、清掉旧天气（`content` + `festivalByDay`）、重取天气、
+  今天这一列重算待办摘要；
+- `AppDelegate` 的 10 秒刷新定时器本来就对日期（`lastReminderDay`），
+  日期一变就调 `dayPanel?.handleDayChange()`；`NSWorkspace.didWakeNotification`
+  里也补一次（睡过午夜，唤醒后立刻换新一天）；
+- `OpenMeteoWeatherProvider` 缓存键改成「本地日期 + 经纬度」
+  （`cacheKey(_:on:calendar:)`），跨天**一定** miss；写入时顺手清掉前一天的键；
+- 补了新 API `locationManagerDidChangeAuthorization`（macOS 11+）——
+  只实现旧的 `didChangeAuthorization` 时，用户点完「允许」可能永远等不到位置。
+
+#### 自检
+
+- `make test`：**2111 项断言全过**（新增：`weatherEnabled` 进 JSON、缓存键跨天不同、
+  `handleDayChange` 换 todayIndex 并重新请求天气、天气同时进 `dayFestivals`）；
+- `--verify-day-panel`：✅ 新增「生产路径必须注入 weatherProvider」+
+  「天气开着但 null → 1 行『暂无数据』」「天气关着 → 0 行」「文案里不能有 0°」；
+- `--verify-day-panel-click`：✅ 真实点击链路无回归；
+- 真机截图（临时数据目录）：
+  `--shot-day-panel … weather-empty.png` 看到「暂无数据」；
+  `--shot-day-panel … weather-data.png weather` 看到「☀ 晴 12° / 21°」。
+
+### 版本
+
+**1.5.4** —— 补丁版，**bundle id 不变**（仍为 `com.desktoptimetable.app.v120`）。
+构建已归档到 `版本迭代/DesktopTimetable-1.5.4.app`。
+
 ## [1.5.3] - 2026-11-10
 
 ### 日记第三轮 + 两个交互修正：折叠锁列 / 悬停隔离 / 今日待办摘要 / 回收站

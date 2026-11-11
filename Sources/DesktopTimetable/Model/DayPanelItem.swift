@@ -110,6 +110,18 @@ struct DayPanelContent: Equatable {
     var isToday: Bool = false
     /// 今天 / 逾期的未处理条数（nil = 还没算出来 / 不是今天）。
     var todoDigest: DayPanelTodoDigest? = nil
+    /// 用户有没有开「显示天气」。
+    ///
+    /// 网页靠它区分「天气功能没开 → 不显示天气行」和
+    /// 「开了但这次没拿到数据 → 显示『暂无数据』」。
+    var weatherEnabled: Bool = false
+    /// 用户在设置里填的**地区名**（空串 = 还没选）。
+    ///
+    /// ⚠️ 2026-11-10 加：天气开着、但**没选地区**时，网页要显示
+    /// 「请在设置里选择地区」（而不是「暂无数据」）—— 否则用户不知道
+    /// 是自己没设置，会以为功能坏了。后台程序在 ad-hoc 签名下拿不到定位，
+    /// 地区是唯一的取数入口（见 `OpenMeteoWeatherProvider` 的说明）。
+    var weatherRegion: String = ""
     /// 节日 / 节气信息（由农历模块提供）。
     var festival: DayPanelFestival = DayPanelFestival()
     /// 待办 / 日程是否**已经向 EventKit 查完并合并**（2026-11 加）。
@@ -135,7 +147,7 @@ struct DayPanelFestival: Equatable {
     var solarTerm: String = ""
     /// 公历 / 农历节日（可能多个）。
     var festivals: [String] = []
-    /// 天气（**可选** —— 没有城市 / 请求失败时是 nil，网页要整行隐藏）。
+    /// 天气（**可选** —— 拿不到时是 nil；网页在「显示天气」开着时显示「暂无数据」）。
     var weather: DayPanelWeather? = nil
     /// 宜（简化建除黄历；拿不到时是空串，网页要整行隐藏）。
     var yi: String = ""
@@ -149,8 +161,8 @@ struct DayPanelFestival: Equatable {
 
 /// 「今日详情」里的天气。
 ///
-/// ⚠️ **拿不到就整个是 nil** —— 网页会**隐藏整行**。
-/// 绝不能出现「0°」或任何假数据。
+/// ⚠️ **拿不到就整个是 nil** —— 网页在「显示天气」开着时显示「暂无数据」，
+/// 绝不会出现「0°」或任何假数据。
 struct DayPanelWeather: Equatable {
     /// 天气现象（中文，如「晴」「多云」「小雨」）。
     var text: String = ""
@@ -175,13 +187,21 @@ extension DayPanelContent {
     ///
     /// 单独抽出来是因为 2026-11 要把**7 天各自的详情**一起推给网页
     /// （`dayFestivals`）—— 每一份都用同一个格式，不能各写一遍。
-    static func festivalJSON(_ festival: DayPanelFestival) -> [String: Any] {
+    ///
+    /// - Parameters:
+    ///   - weatherEnabled: 用户有没有开「显示天气」。
+    ///     网页据此决定「天气为 null」时是显示「暂无数据」还是不显示这一行。
+    ///   - region: 用户在设置里填的**地区名**（空串 = 还没选）。
+    ///     没选地区时网页显示「请在设置里选择地区」，不显示「暂无数据」。
+    static func festivalJSON(_ festival: DayPanelFestival,
+                             weatherEnabled: Bool = false,
+                             region: String = "") -> [String: Any] {
         [
             "lunar": festival.lunar,
             "term": festival.solarTerm,
             "festivals": festival.festivals,
-            // 天气是**可选**字段：没有城市 / 请求失败时整个键是 null，
-            // 网页收到 null 就**隐藏整行**（绝不显示假数据）。
+            // 天气是**可选**字段：没有数据时整个键是 null。
+            // 网页收到 null 时：开了「显示天气」→ 显示「暂无数据」；没开 → 不显示天气行。
             "weather": festival.weather.map { w -> [String: Any] in
                 var d: [String: Any] = ["text": w.text]
                 if let t = w.temperature { d["temperature"] = t }
@@ -189,6 +209,10 @@ extension DayPanelContent {
                 if let m = w.max { d["max"] = m }
                 return d
             } as Any? ?? NSNull(),
+            // 用户开没开「显示天气」（网页用来区分「暂无数据」和「不显示」）。
+            "weatherEnabled": weatherEnabled,
+            // 地区（空串 = 还没选 → 网页提示「请在设置里选择地区」）。
+            "region": region,
             // 宜 / 忌：空串 = 拿不到（网页隐藏这一行）。
             "yi": festival.yi,
             "ji": festival.ji,
@@ -224,7 +248,9 @@ extension DayPanelContent {
             "isToday": isToday,
             "todoDigest": todoDigest.map { ["today": $0.today, "overdue": $0.overdue] }
                 ?? NSNull(),
-            "festival": DayPanelContent.festivalJSON(festival),
+            "festival": DayPanelContent.festivalJSON(festival,
+                                                     weatherEnabled: weatherEnabled,
+                                                     region: weatherRegion),
             // 待办 / 日程是否已查完（网页判断「要不要补发请求」用）。
             "ready": ready,
         ]

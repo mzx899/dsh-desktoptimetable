@@ -125,15 +125,6 @@ final class DayPanelSettingsCard: NSView {
     /// 顺便**重新查一次**授权状态。
     var onOpenAuthorization: (() -> Void)?
 
-    /// 用户拨动了「显示天气」开关（参数 = 拨动之后的目标值）。
-    var onToggleWeather: ((Bool) -> Void)?
-
-    /// 用户点了天气那一行的「去授权」。
-    ///
-    /// 打开的是**定位**隐私面板（`Privacy_Location`）——
-    /// 和日历 / 提醒事项是**三个不同的**系统面板，开错等于没开。
-    var onOpenLocationSettings: (() -> Void)?
-
     // MARK: - 子视图
 
     /// 开关行（第一行）。
@@ -142,9 +133,6 @@ final class DayPanelSettingsCard: NSView {
     private let listRow = DayPanelListRow()
     /// 已完成提醒事项行（第三行，默认收起）。
     let completedRowView = CompletedRemindersRow()
-    /// 天气行（第四行）。
-    private let weatherRow = DayPanelWeatherRow()
-
     /// 卡片标题。
     static let cardTitle = "日期覆盖层"
 
@@ -168,18 +156,12 @@ final class DayPanelSettingsCard: NSView {
             self?.onSelectList?()
         }
 
-        weatherRow.onToggleWeather = { [weak self] isOn in
-            self?.onToggleWeather?(isOn)
-        }
-        weatherRow.onOpenLocationSettings = { [weak self] in
-            self?.onOpenLocationSettings?()
-        }
-
         card.addRow(enableRow)
         card.addRow(listRow)
-        // 顺序：接入 → 清单 → 已完成的提醒事项 → 显示天气。
+        // 顺序：接入 → 清单 → 已完成的提醒事项。
+        // ⚠️ 天气**不在这张卡里**了（2026-11-10 用户要求单独一个板块），
+        // 见 `WeatherSettingsCard`。
         card.addRow(completedRowView)
-        card.addRow(weatherRow)
 
         addSubview(card)
         NSLayoutConstraint.activate([
@@ -201,13 +183,10 @@ final class DayPanelSettingsCard: NSView {
     func update(enabled: Bool,
                 authState: DayPanelAuthState,
                 listName: String,
-                weatherEnabled: Bool = false,
-                locationAuthStatus: CLAuthorizationStatus? = nil,
                 completedAccess: CompletedRemindersRow.Access = .disabled) {
         enableRow.update(enabled: enabled, authState: authState)
         listRow.update(listName: listName)
         completedRowView.updateAccess(completedAccess)
-        weatherRow.update(enabled: weatherEnabled, authStatus: locationAuthStatus)
     }
 
     /// 开关当前是开是关（自检用）。
@@ -215,15 +194,6 @@ final class DayPanelSettingsCard: NSView {
 
     /// 当前显示的清单名（自检用）。
     var displayedListName: String { listRow.displayedListName }
-
-    /// 天气开关当前是开是关（自检用）。
-    var isWeatherEnabled: Bool { weatherRow.isOn }
-
-    /// 天气行当前的状态文案（自检用）。
-    var displayedWeatherStatus: String { weatherRow.displayedStatus }
-
-    /// 天气行的「去授权」按钮现在显示着吗（自检用）。
-    var showsWeatherAuthorizeButton: Bool { weatherRow.showsAuthorizeButton }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }

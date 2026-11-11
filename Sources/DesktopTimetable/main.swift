@@ -513,6 +513,16 @@ if arguments.contains("--verify-todo-digest") {
         func requestCurrentLocation(_ completion: @escaping (CLLocationCoordinate2D?) -> Void) {
             completion(nil)
         }
+        func resolveCity(_ name: String, completion: @escaping (CLLocationCoordinate2D?) -> Void) {
+            completion(nil)
+        }
+        func fetchForecast(completion: @escaping ([String: DayPanelWeather]) -> Void) {
+            completion([:])
+        }
+        func fetchForecast(at coordinate: CLLocationCoordinate2D,
+                           completion: @escaping ([String: DayPanelWeather]) -> Void) {
+            completion([:])
+        }
     }
 
     let app = NSApplication.shared
@@ -595,6 +605,16 @@ if arguments.contains("--verify-diary") {
         func weather(for coordinate: CLLocationCoordinate2D) -> DayPanelWeather? { nil }
         func requestCurrentLocation(_ completion: @escaping (CLLocationCoordinate2D?) -> Void) {
             completion(nil)
+        }
+        func resolveCity(_ name: String, completion: @escaping (CLLocationCoordinate2D?) -> Void) {
+            completion(nil)
+        }
+        func fetchForecast(completion: @escaping ([String: DayPanelWeather]) -> Void) {
+            completion([:])
+        }
+        func fetchForecast(at coordinate: CLLocationCoordinate2D,
+                           completion: @escaping ([String: DayPanelWeather]) -> Void) {
+            completion([:])
         }
     }
 
@@ -1167,6 +1187,43 @@ if arguments.contains("--verify-web-render") {
 
     if let pe = obj["parseError"] as? String { problems.append("JS 解析错误：\(pe)") }
     if let re = obj["renderError"] as? String { problems.append("JS 渲染错误：\(re)") }
+
+    // ---- 面板文字**不可框选**（2026-11-11 用户两次反馈，这里用真实 WKWebView 验）----
+    //
+    // 打开日期覆盖层，读 `.dpbody` 的计算样式：必须是 `user-select: none`。
+    // （第一次只改了 `.dpscroll`，真正的正文容器是 `.dpbody.narrow.scroll`，所以漏了。）
+    var selectStyle: String?
+    renderer.evaluateForTest("""
+    (function () {
+      var f = { lunar: '农历九月廿三', term: '', festivals: [], weather: null,
+                weatherEnabled: false, region: '', yi: '', ji: '' };
+      var all = {};
+      for (var d = 1; d <= 7; d++) all[String(d)] = f;
+      if (window.ttDayPanelSetState) {
+        window.ttDayPanelSetState({ dayPanel: { day: 3, todos: [], events: [],
+                                  festival: f, weatherEnabled: false },
+          dayFestivals: all, dayFlags: {}, dayPanelOpen: true });
+      }
+      if (window.ttDayPanelOpen) window.ttDayPanelOpen(3, false);
+      var body = document.querySelector('.dpbody');
+      if (!body) return 'no-dpbody';
+      var cs = getComputedStyle(body);
+      return JSON.stringify({ userSelect: cs.userSelect || '',
+                              webkit: cs.webkitUserSelect || '' });
+    })();
+    """) { r in selectStyle = r }
+    for _ in 0..<30 { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+    if let raw = selectStyle, let data = raw.data(using: .utf8),
+       let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        let us = (o["userSelect"] as? String) ?? ""
+        let wk = (o["webkit"] as? String) ?? ""
+        print("  面板正文 user-select：\(us) / webkit=\(wk)")
+        if us != "none" && wk != "none" {
+            problems.append("面板正文仍可框选（user-select=\(us)，webkit=\(wk)）")
+        }
+    } else {
+        problems.append("读不到面板正文的 user-select 计算样式（\(selectStyle ?? "nil")）")
+    }
 
     // B 模式：整个过程不允许有 takeSnapshot
     if renderer.testRealSnapshotCount != 0 {
@@ -1996,6 +2053,89 @@ if arguments.contains("--verify-panel-sections") {
     ctl.closeForAutomationCleanup()
     if problems.isEmpty {
         print("✅ 设置面板两级结构（板块首页 → 分类页）：通过")
+        exit(0)
+    }
+    for p in problems { print("❌ \(p)") }
+    exit(1)
+}
+
+if arguments.contains("--verify-settings-first-open") {
+    // 自检：**设置面板第一次打开时不能出现在屏幕左下角**（2026-11-11）。
+    //
+    // 用户原话：「第一次打开设置设置出现的位置在左下角」。
+    //
+    // 根因（实测）：`buildWindow()` 的最后两行 `makeKeyAndOrderFront` +
+    // `orderFrontRegardless` 把窗口**在 origin 还是 (0, 54)（屏幕左下角 / 程序坞上方）时**
+    // 就摆到了前面 —— 面板以左下角的姿态上屏了至少一帧，之后 `show()` 才把它摆正。
+    // 第二次打开正常，是因为 `buildWindow()` 不再跑、窗口早已在正确位置。
+    //
+    // 验的是**「第一次可见时」的那一帧位置**（`testFirstVisibleFrame`）——
+    // 只看最终位置是不够的：最终位置对，中间闪一下左下角用户照样看得见。
+    //
+    // 判据：
+    //   1. 第一次可见时，窗口中心必须**贴着锚点**（课表卡片中心）；
+    //   2. 第一次可见时，窗口**不能落在屏幕左下角**
+    //      （离左边缘 < 40pt 且离下边缘 < 40pt）；
+    //   3. 关掉再打开，位置仍然稳定（不能越开越歪）。
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+
+    let ctl = SettingsWindowController(store: ScheduleStore(),
+                                       timetableStore: TimetableStore()) {}
+    var problems: [String] = []
+
+    func check(_ cond: Bool, _ message: String) {
+        if !cond { problems.append(message) }
+    }
+
+    // 锚点：自检里没有课表卡片，`cardAnchor()` 退回主屏可见区中心。
+    let anchor = ctl.cardAnchor() ?? .zero
+    let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+
+    // ---- 1) 第一次打开 ----
+    ctl.show(relativeTo: nil)
+    RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+
+    guard let first = ctl.testFirstVisibleFrame else {
+        print("❌ 没能记到面板第一次可见时的 frame（自检失效）")
+        exit(1)
+    }
+    print("  第一次可见时 frame = \(first)")
+    print("  锚点（主屏中心）   = \(anchor)")
+
+    // 判据 1：第一次可见时中心必须贴着锚点（容差 2pt）。
+    let centerDX = abs(first.midX - anchor.x)
+    let centerDY = abs(first.midY - anchor.y)
+    check(centerDX <= 2 && centerDY <= 2,
+          "第一次可见时面板中心偏离锚点 \(Int(centerDX))×\(Int(centerDY))pt（frame=\(first)）")
+
+    // 判据 2：不能落在屏幕左下角（程序坞上方那一小块）。
+    let nearLeft = first.minX - screen.minX < 40
+    let nearBottom = first.minY - screen.minY < 40
+    check(!(nearLeft && nearBottom),
+          "第一次可见时面板落在屏幕左下角（frame=\(first)，屏幕=\(screen)）")
+
+    // 判据 3：整个窗口必须在屏幕可见区内。
+    check(screen.contains(first) || screen.insetBy(dx: -1, dy: -1).contains(first),
+          "第一次可见时面板不在屏幕可见区内（frame=\(first)，屏幕=\(screen)）")
+
+    // ---- 2) 关掉再打开：位置不能漂 ----
+    let secondAnchor = ctl.cardAnchor() ?? .zero
+    ctl.closeForTest()
+    RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+    ctl.show(relativeTo: nil)
+    RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+    if let w = ctl.window {
+        let dx = abs(w.frame.midX - secondAnchor.x)
+        let dy = abs(w.frame.midY - secondAnchor.y)
+        check(dx <= 2 && dy <= 2,
+              "第二次打开后位置偏离锚点 \(Int(dx))×\(Int(dy))pt（frame=\(w.frame)）")
+    }
+
+    // ⚠️ **自检收尾：把设置面板收走**（否则它一直浮在用户窗口前面）。
+    ctl.closeForAutomationCleanup()
+    if problems.isEmpty {
+        print("✅ 设置面板第一次打开的位置（不在左下角）：通过")
         exit(0)
     }
     for p in problems { print("❌ \(p)") }
@@ -4749,6 +4889,10 @@ if arguments.contains("--verify-day-panel") {
     func fail(_ s: String) { problems.append(s) }
     func check(_ cond: Bool, _ msg: String) { if !cond { fail(msg) } }
 
+    // ---- 0. 生产路径必须接上天气数据源（2026-11 修「天气永远没有数据」）----
+    check(delegate.testDayPanel?.hasWeatherProvider == true,
+          "AppDelegate 建日期覆盖层时必须注入 weatherProvider（否则天气永远不加载）")
+
     // ---- 1. 农历 / 节气 / 节日（纯函数）----
     //
     // ⚠️ 时区用**固定 +08:00**，不能用 `Asia/Shanghai` ——
@@ -5725,6 +5869,8 @@ if arguments.contains("--verify-day-panel") {
         festival: {
           lunar: '农历九月廿三', term: '霜降', festivals: ['万圣节前夜'],
           weather: { text: '晴', temperature: 12, min: 12, max: 21 },
+          // 天气现在**单独一张卡**（2026-11-10），所以 festival 里要带开关 / 地区。
+          weatherEnabled: true, region: '秦皇岛',
           yi: '出行', ji: '动土'
         }
       };
@@ -5742,7 +5888,7 @@ if arguments.contains("--verify-day-panel") {
 
       var cards = document.querySelectorAll('.dpcard');
       out.cardCount = cards.length;
-      // 每条待办 / 每条日程各一张卡 + 今日详情一张 + 「＋ 添加待办」一张幽灵卡
+      // 每条待办 / 每条日程各一张卡 + 今日详情一张 + 天气一张 + 「＋ 添加待办」一张幽灵卡
       out.todoCards = document.querySelectorAll('.dpcard.todo').length;
       out.eventCards = document.querySelectorAll('.dpcard.event').length;
       out.detailCards = document.querySelectorAll('.dpcard.detail').length;
@@ -5806,7 +5952,7 @@ if arguments.contains("--verify-day-panel") {
       }
 
       // 天气行 / 宜忌行必须渲染出来。
-      out.weatherRows = document.querySelectorAll('.dpweather').length;
+      out.weatherRows = document.querySelectorAll('.dpwbox').length;
       out.yijiRows = document.querySelectorAll('.dpyiji').length;
 
       // ---- 溢出 → 面板内可滚动，且能滚到底 ----
@@ -5846,10 +5992,10 @@ if arguments.contains("--verify-day-panel") {
        let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
         // ---- 条目数 = 卡片数 ----
         //
-        // 3 条待办 + 1 张日记（空态）+ 2 条日程 + 1 张今日详情 + 1 张「＋ 添加待办」= 8 张
-        //（2026-11-10 加日记卡）。
-        check((obj["cardCount"] as? NSNumber)?.intValue == 8,
-              "3 待办 + 日记 + 2 日程 + 今日详情 + 添加待办 = 8 张卡片（实际 \(obj["cardCount"] ?? "?") 张）")
+        // 3 条待办 + 1 张日记（空态）+ 2 条日程 + 1 张今日详情 + 1 张天气
+        // + 1 张「＋ 添加待办」= 9 张（2026-11-10 天气拆成独立卡）。
+        check((obj["cardCount"] as? NSNumber)?.intValue == 9,
+              "3 待办 + 日记 + 2 日程 + 今日详情 + 天气 + 添加待办 = 9 张卡片（实际 \(obj["cardCount"] ?? "?") 张）")
         check((obj["todoCards"] as? NSNumber)?.intValue == 3,
               "每条待办一张卡（实际 \(obj["todoCards"] ?? "?") 张）")
         check((obj["eventCards"] as? NSNumber)?.intValue == 2,
@@ -5908,9 +6054,10 @@ if arguments.contains("--verify-day-panel") {
               "有宜忌数据时要渲染一行宜 / 忌（实际 \(obj["yijiRows"] ?? "?") 行）")
 
         // ---- 溢出 → 面板内滚动，能滚到底 ----
-        // 30 条待办 + 1 张「＋ 添加待办」+ 1 张「今日无日程」空状态 + 1 张今日详情 = 33。
-        check((obj["manyCards"] as? NSNumber)?.intValue == 34,
-              "30 条待办一张都不能少（+ 添加待办 + 日记 + 无日程 + 详情 = 34 张，实际 \(obj["manyCards"] ?? "?") 张）")
+        // 30 条待办 + 1 张「＋ 添加待办」+ 1 张「今日无日程」空状态 + 1 张今日详情
+        // + 1 张日记（沿用上一轮状态里的）+ 1 张天气 = 35。
+        check((obj["manyCards"] as? NSNumber)?.intValue == 35,
+              "30 条待办一张都不能少（+ 添加待办 + 日记 + 无日程 + 详情 + 天气 = 35 张，实际 \(obj["manyCards"] ?? "?") 张）")
         check((obj["overflowY"] as? String) == "auto",
               "内容超高时底板要能滚（overflow-y = \(obj["overflowY"] ?? "?")）")
         check((obj["canScroll"] as? Bool) == true,
@@ -5966,41 +6113,58 @@ if arguments.contains("--verify-day-panel") {
         check(before > 0, "先滚下去一点（实际 \(before)pt）")
         check(abs(after - before) <= 2,
               "原生推状态后滚动位置要保持（\(before) → \(after)）")
-        // 2026-11-10：日记卡是第 34 张（待办 / 日记 / 日程 / 详情 × 各列）。
-        check((obj["cardsStillThere"] as? NSNumber)?.intValue == 34,
+        // 2026-11-10：日记 + 天气各一张，共 35 张。
+        check((obj["cardsStillThere"] as? NSNumber)?.intValue == 35,
               "推状态之后卡片不能消失（实际 \(obj["cardsStillThere"] ?? "?") 张）")
     } else {
         fail("拿不到滚动位置的诊断结果")
     }
 
-    // ---- 4c-6. **天气拿不到时整行隐藏**（绝不显示假数据）----
+    // ---- 4c-6. **天气拿不到时怎么显示**（2026-11-10 改）----
     //
-    // 天气 / 宜忌是**可选**字段：没城市 / 拒绝授权 / 网络失败时
-    // 原生推的 `weather` 是 null，网页必须**整行不渲染**。
+    // 三种情况（用户要求）：
+    //   · 没选地区 → 「请在设置里选择地区」（否则用户以为是功能坏了）；
+    //   · 选了地区、这次没拿到 → 「暂无数据」；
+    //   · 功能没开 → 整行不显示。
     var weatherResult: String?
     let weatherProbe = """
     (function () {
       var out = {};
-      var fake = {
-        day: 3, todos: [], events: [],
-        festival: { lunar: '农历九月廿三', term: '', festivals: [], weather: null, yi: '', ji: '' }
-      };
-      if (window.ttDayPanelSetState) {
-        // ⚠️ **也要给 dayFestivals**（2026-11）——
-        // 网页优先用 `dayFestivals[day]`，不给的话会沿用上一轮的旧值。
-        window.ttDayPanelSetState({ dayPanel: fake,
-          dayFestivals: { '1': fake.festival, '2': fake.festival, '3': fake.festival,
-                          '4': fake.festival, '5': fake.festival, '6': fake.festival,
-                          '7': fake.festival },
-          dayFlags: {}, dayPanelOpen: true });
+      function festWith(weatherEnabled, region) {
+        return { lunar: '农历九月廿三', term: '', festivals: [],
+                 weather: null, weatherEnabled: weatherEnabled, region: region,
+                 yi: '', ji: '' };
       }
-      if (window.ttDayPanelOpen) window.ttDayPanelOpen(3, false);
-      out.weatherRows = document.querySelectorAll('.dpweather').length;
+      function inject(f) {
+        var all = {};
+        for (var d = 1; d <= 7; d++) all[String(d)] = f;
+        if (window.ttDayPanelSetState) {
+          // ⚠️ **也要给 dayFestivals**（2026-11）——
+          // 网页优先用 `dayFestivals[day]`，不给的话会沿用上一轮的旧值。
+          window.ttDayPanelSetState({ dayPanel: {
+            day: 3, todos: [], events: [], festival: f, weatherEnabled: f.weatherEnabled,
+            weatherRegion: f.region
+          }, dayFestivals: all, dayFlags: {}, dayPanelOpen: true });
+        }
+        if (window.ttDayPanelOpen) window.ttDayPanelOpen(3, false);
+      }
+      // ① 选了地区、没有数据 → 一行「暂无数据」。
+      inject(festWith(true, '秦皇岛'));
+      out.enabledRows = document.querySelectorAll('.dpwbox').length;
+      out.enabledText = document.querySelector('.dpwbox') ?
+        (document.querySelector('.dpwbox').textContent || '') : '';
       out.yijiRows = document.querySelectorAll('.dpyiji').length;
       out.detailCards = document.querySelectorAll('.dpcard.detail').length;
-      // 文本里**不能**出现「0°」这种假数据。
       var d = document.querySelector('.dpcard.detail');
       out.detailText = d ? (d.textContent || '') : '';
+      // ② 没选地区 → 一行「请在设置里选择地区」。
+      inject(festWith(true, ''));
+      out.noRegionRows = document.querySelectorAll('.dpwbox').length;
+      out.noRegionText = document.querySelector('.dpwbox') ?
+        (document.querySelector('.dpwbox').textContent || '') : '';
+      // ③ 功能关着 → 整行不显示。
+      inject(festWith(false, ''));
+      out.disabledRows = document.querySelectorAll('.dpwbox').length;
       return JSON.stringify(out);
     })();
     """
@@ -6010,14 +6174,26 @@ if arguments.contains("--verify-day-panel") {
     for _ in 0..<40 { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
     if let raw = weatherResult, let data = raw.data(using: .utf8),
        let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-        check((obj["weatherRows"] as? NSNumber)?.intValue == 0,
-              "天气为 null 时不能渲染天气行（实际 \(obj["weatherRows"] ?? "?") 行）")
+        check((obj["enabledRows"] as? NSNumber)?.intValue == 1,
+              "天气开着、选了地区但没数据 → 一行「暂无数据」（实际 \(obj["enabledRows"] ?? "?") 行）")
+        let text = obj["enabledText"] as? String ?? ""
+        check(text.contains("暂无数据"),
+              "选了地区、没有数据时要写「暂无数据」（实际「\(text)」）")
+        check(!text.contains("0°"), "没有天气时不能显示「0°」这种假数据")
+        // ⚠️ 2026-11-10：没选地区 → 明确告诉用户去设置里选，而不是「暂无数据」。
+        check((obj["noRegionRows"] as? NSNumber)?.intValue == 1,
+              "没选地区 → 也要有一行提示（实际 \(obj["noRegionRows"] ?? "?") 行）")
+        let noRegion = obj["noRegionText"] as? String ?? ""
+        check(noRegion.contains("请在设置里选择地区"),
+              "没选地区时要提示「请在设置里选择地区」（实际「\(noRegion)」）")
+        check(!noRegion.contains("暂无数据"),
+              "没选地区时不能显示「暂无数据」（那会让用户以为没网）")
+        check((obj["disabledRows"] as? NSNumber)?.intValue == 0,
+              "天气关着 → 不显示天气行（实际 \(obj["disabledRows"] ?? "?") 行）")
         check((obj["yijiRows"] as? NSNumber)?.intValue == 0,
               "宜忌为空时不能渲染宜 / 忌行（实际 \(obj["yijiRows"] ?? "?") 行）")
         check((obj["detailCards"] as? NSNumber)?.intValue == 1,
               "「今日详情」卡本身**不能消失**（实际 \(obj["detailCards"] ?? "?") 张）")
-        let text = obj["detailText"] as? String ?? ""
-        check(!text.contains("0°"), "没有天气时不能显示「0°」这种假数据")
     } else {
         fail("拿不到天气降级的诊断结果")
     }
@@ -6029,6 +6205,10 @@ if arguments.contains("--verify-day-panel") {
     //   · 关了「显示天气」→ **不请求**（`requestCount` 不涨）；
     //   · 宜忌是**离线**算的（`AlmanacCalendar`），不依赖天气开关。
     let fakeWeather = FakeWeatherProvider(stub: DayPanelWeather(text: "晴", temperature: 12, min: 12, max: 21))
+    // 预报按天给（2026-11）：baseMonday = 2026-11-02 → 第 3 列 = 2026-11-04。
+    fakeWeather.forecast = [
+        "2026-11-04": DayPanelWeather(text: "晴", temperature: 12, min: 12, max: 21),
+    ]
     let weatherController = DayPanelController(
         settings: DayPanelSettings(enabled: true, weatherEnabled: true),
         festivalProvider: DayPanelFestivalProviderFactory.make(weatherProvider: fakeWeather),
@@ -6043,6 +6223,34 @@ if arguments.contains("--verify-day-panel") {
           "开了「显示天气」→ 天气要进到覆盖层内容里（实际 \(wContent.festival.weather?.text ?? "nil")）")
     check(wContent.festival.weather?.max == 21,
           "天气要带最高温（实际 \(String(describing: wContent.festival.weather?.max))）")
+    check(wContent.weatherEnabled, "内容里要带「显示天气」开关状态（网页用来显示「暂无数据」）")
+    // ⚠️ **天气必须同时进 `dayFestivals`**（2026-11 修「天气永远不显示」）：
+    // 网页的 `panelDataFor()` 会用 `dayFestivals[day]` 覆盖 `dayPanel.festival`。
+    // 只写 `content.festival.weather` 的话，推出去又被覆盖成 null。
+    let pushedFestival = weatherController.currentFestivalsJSON()["3"] as? [String: Any]
+    let pushedWeather = pushedFestival?["weather"] as? [String: Any]
+    check(pushedWeather?["text"] as? String == "晴",
+          "7 天详情里对应日期的那一列也要带天气（否则网页覆盖后天气消失）")
+    check(pushedFestival?["weatherEnabled"] as? Bool == true,
+          "7 天详情里要带 weatherEnabled")
+    // ⚠️ 2026-11-10：没填地区时 region 是空串 —— 网页据此提示「请在设置里选择地区」。
+    check(pushedFestival?["region"] as? String == "",
+          "没填地区时 region 要是空串（实际 \(String(describing: pushedFestival?["region"]))）")
+
+    // 填了地区 → 地区名要随 7 天详情一起推给网页。
+    let regionWeather = FakeWeatherProvider(stub: DayPanelWeather(text: "晴", temperature: 12, min: 12, max: 21))
+    let regionController = DayPanelController(
+        settings: DayPanelSettings(enabled: true, weatherEnabled: true, weatherCity: "秦皇岛"),
+        festivalProvider: DayPanelFestivalProviderFactory.make(weatherProvider: regionWeather),
+        todayIndex: 1,
+        baseMonday: day(2026, 11, 2),
+        eventStore: FakeEventKitStore(),
+        weatherProvider: regionWeather)
+    regionController.open(day: 3)
+    for _ in 0..<10 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    let regionFestival = regionController.currentFestivalsJSON()["3"] as? [String: Any]
+    check(regionFestival?["region"] as? String == "秦皇岛",
+          "填了地区时 region 要推过去（实际 \(String(describing: regionFestival?["region"]))）")
     // 宜忌是离线算的 —— 不看天气开关。
     check(!wContent.festival.yi.isEmpty, "「今日详情」要有宜（实际「\(wContent.festival.yi)」）")
     check(!wContent.festival.ji.isEmpty, "「今日详情」要有忌（实际「\(wContent.festival.ji)」）")
@@ -9090,6 +9298,71 @@ if arguments.contains("--shot-alert-dialog") {
     exit(1)
 }
 
+if arguments.contains("--shot-diary-editor") {
+    // 出图：设置 →「日记」→ 新建 / 编辑 那个小窗口（时 / 分两个框 + 引导文字）。
+    //
+    // 用法：`--shot-diary-editor <out.png>`
+    let idx = arguments.firstIndex(of: "--shot-diary-editor")!
+    let out = idx + 1 < arguments.count
+        ? arguments[idx + 1]
+        : (NSTemporaryDirectory() as NSString).appendingPathComponent("diary-editor.png")
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let win = DiaryEditorDialog.buildWindowForTest(title: "写日记", entry: nil, confirmTitle: "保存")
+    NSApp.activate(ignoringOtherApps: true)
+    win.makeKeyAndOrderFront(nil)
+    win.orderFrontRegardless()
+    RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+    p.arguments = ["-x", "-o", "-l\(win.windowNumber)", out]
+    try? p.run()
+    p.waitUntilExit()
+    if FileManager.default.fileExists(atPath: out) {
+        print("已截图 \(out)")
+        exit(0)
+    }
+    print("❌ 抓图失败（窗口 \(win.windowNumber)）")
+    exit(1)
+}
+
+if arguments.contains("--shot-city-picker") {
+    // 出图：设置 → 提醒 → 日期覆盖层 →「地区」那一行弹出的城市选择器。
+    //
+    // 用法：`--shot-city-picker <out.png> [搜索词]`
+    //   · `--shot-city-picker /tmp/p.png`          → 热门城市 + A–Z
+    //   · `--shot-city-picker /tmp/p.png qinhuang` → 搜索态
+    //
+    // ⚠️ 和别的弹窗一样**只能从屏幕抓**（HUD 材质 + 假光要跟桌面合成），
+    // `cacheDisplay` 抓出来是白板。
+    let idx = arguments.firstIndex(of: "--shot-city-picker")!
+    let out = idx + 1 < arguments.count
+        ? arguments[idx + 1]
+        : (NSTemporaryDirectory() as NSString).appendingPathComponent("city-picker.png")
+    let query = idx + 2 < arguments.count ? arguments[idx + 2] : ""
+    // 可选第三个参数 = 「当前地区」（默认秦皇岛；出图时想高亮某一条就传它）。
+    let current = idx + 3 < arguments.count ? arguments[idx + 3] : "秦皇岛"
+
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let win = CityPickerDialog.buildWindowForTest(current: current, query: query)
+    NSApp.activate(ignoringOtherApps: true)
+    win.makeKeyAndOrderFront(nil)
+    win.orderFrontRegardless()
+    RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+    p.arguments = ["-x", "-o", "-l\(win.windowNumber)", out]
+    try? p.run()
+    p.waitUntilExit()
+    if FileManager.default.fileExists(atPath: out) {
+        print("已截图 \(out)")
+        exit(0)
+    }
+    print("❌ 抓图失败（窗口 \(win.windowNumber)）")
+    exit(1)
+}
+
 if arguments.contains("--shot-import-diff") {
     // 出图：导入时「检测到冲突」的那个大列表窗口（差异合并页）。
     //
@@ -10410,6 +10683,152 @@ if let idx = arguments.firstIndex(of: "--shot-day-panel") {
             "return JSON.stringify(out);})();"
         ) { r in print("空态卡片文字：\(r ?? "nil")") }
         for _ in 0..<10 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    }
+
+    // 可选：截**真实**天气（`--shot-day-panel <out> realweather`）。
+    //
+    // ⚠️ 必须用 `open` 启动（走 LaunchServices，TCC 才认这个 app 的定位授权），
+    // 而且数据要等网络回包（几秒）—— 所以先等再截。
+    // 这里的设置目录由 `DT_DATA_DIR` 决定（城市名写在 settings.json 里）。
+    if arguments.contains("realweather") {
+        // 让原生真的去取一次（打开面板 → 触发 loadWeather）。
+        renderer.evaluateForTest(
+            "(function(){ if (window.ttDayPanelOpen) window.ttDayPanelOpen(\(panelDay)); return 'ok'; })();"
+        ) { _ in }
+        // 等天气回来（网络 + 城市查询，最长 20 秒）。
+        var weatherText = ""
+        for _ in 0..<40 {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+            renderer.evaluateForTest(
+                "(function(){var e=document.querySelector('.dpwbox');return e?e.textContent:'';})();"
+            ) { r in
+                if let t = r, t.contains("暂无") == false, t.isEmpty == false {
+                    weatherText = t
+                }
+            }
+            if weatherText.isEmpty == false { break }
+        }
+        print("真实天气行：\(weatherText.isEmpty ? "(没拿到)" : weatherText)")
+        // ⚠️ 诊断：网页侧到底读到了哪一份天气（`__ttDP` 是只读调试出口）。
+        renderer.evaluateForTest(
+            "(function(){var out={};var DP=window.__ttDP&&window.__ttDP();" +
+            "var S=window.__ttS&&window.__ttS();" +
+            "out.dayFestivals = DP?JSON.stringify(DP.dayFestivals):'no DP';" +
+            "out.dayPanelFestival = (S&&S.dayPanel&&S.dayPanel.festival)?JSON.stringify(S.dayPanel.festival):'null';" +
+            "out.cache2 = (DP&&DP.cache&&DP.cache['2'])?JSON.stringify(DP.cache['2'].festival):'null';" +
+            "out.dpDay = DP?DP.day:-1; out.open=DP?DP.open:false;" +
+            "var el=document.querySelector('.dpwbox'); out.rendered = el?el.textContent:'';" +
+            "return JSON.stringify(out);})();"
+        ) { r in print("网页天气诊断：\(r ?? "nil")") }
+            // 等网页自己收到推送（原生每次推状态都会触发一次 ttUpdate）。
+            var seen = ""
+            for _ in 0..<40 {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+                renderer.evaluateForTest(
+                    "(function(){var D=window.__ttDP&&window.__ttDP();" +
+                    "if(!D||!D.dayFestivals)return '';" +
+                    "var ks=[];for(var k in D.dayFestivals){" +
+                    "if(Object.prototype.hasOwnProperty.call(D.dayFestivals,k))" +
+                    "ks.push(k+'='+(D.dayFestivals[k].lunar||'?'));}" +
+                    "return ks.join(' ');})();"
+                ) { r in
+                    if let t = r, t.isEmpty == false { seen = t }
+                }
+            }
+            print("网页最终持有的 dayFestivals：\(seen)")
+            renderer.evaluateForTest(
+                "(function(){return JSON.stringify((window.__ttDiagFestivals||[]).slice(-3));})();"
+            ) { r in print("网页逐次收到的：\(r ?? "nil")") }
+            renderer.evaluateForTest(
+                "(function(){var j=window.__ttLastStateJSON||'';" +
+                "var p=j.indexOf('dayFestivals');" +
+                "return p<0?'no match':j.substr(p,420);})();"
+            ) { r in print("网页收到的原始 JSON 片段：\(r ?? "nil")") }
+    }
+
+    // 可选：截「有天气数据」的样子（`--shot-day-panel <out> weather`）。
+    //
+    // 自动化模式不联网、也没有定位 —— 真实数据永远是 nil（会显示「暂无数据」）。
+    // 这里注入一份假天气，核对有数据时的排版 / 温度 / 图标。
+    // 可选：截「天气开着、但还没选地区」的样子（`--shot-day-panel <out> noregion`）。
+    //
+    // 2026-11-10：没选地区时面板要提示「请在设置里选择地区」——
+    // 这句话在窄列里会不会被截断 / 换行得太难看，只能靠出图看。
+    if arguments.contains("noregion") {
+        let inject = """
+        (function () {
+          var f = { lunar: '农历九月廿三', term: '', festivals: [],
+                    weather: null, weatherEnabled: true, region: '',
+                    yi: '出行', ji: '动土' };
+          var all = {};
+          for (var d = 1; d <= 7; d++) all[String(d)] = f;
+          if (window.ttDayPanelSetState) {
+            window.ttDayPanelSetState({ dayPanel: {
+              day: \(panelDay), todos: [], events: [], festival: f,
+              weatherEnabled: true, weatherRegion: ''
+            }, dayFestivals: all, dayFlags: {}, dayPanelOpen: true });
+          }
+          if (window.ttDayPanelOpen) window.ttDayPanelOpen(\(panelDay), false);
+          var el = document.querySelector('.dpwbox');
+          return JSON.stringify({ rows: document.querySelectorAll('.dpwbox').length,
+                                  text: el ? el.textContent : '' });
+        })();
+        """
+        var injected = ""
+        renderer.evaluateForTest(inject) { r in injected = r ?? "" }
+        for _ in 0..<60 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+        print("注入未选地区状态：\(injected)")
+    }
+
+    if arguments.contains("weather") {
+        // ⚠️ **按天注入不同的天气**（2026-11）：真实的预报是 7 天各一份，
+        // 出图要能看出「每一列显示的是自己那天的天气」。
+        let inject = """
+        (function () {
+          // ⚠️ **按日期注入**（2026-11）：预报是按天的，不是按「第几列」。
+          // 键 = 真实的日期（`2026-11-09` … `2026-11-15`）。
+          var samples = {
+            '2026-11-09': { text: '晴', temperature: null, min: -2, max: 8 },
+            '2026-11-10': { text: '晴', temperature: 2, min: -5, max: 6 },
+            '2026-11-11': { text: '晴', temperature: null, min: 1, max: 9 },
+            '2026-11-12': { text: '晴', temperature: null, min: 5, max: 11 },
+            '2026-11-13': { text: '大部晴朗', temperature: null, min: 0, max: 12 },
+            '2026-11-14': { text: '雾', temperature: null, min: 3, max: 13 },
+            '2026-11-15': { text: '阴', temperature: null, min: 2, max: 9 }
+          };
+          var all = {};
+          var monday = '2026-11-09';
+          for (var d = 1; d <= 7; d++) {
+            var dateKey = monday;
+            // 按天偏移（出图用固定周：2026-11-09 是周一）。
+            var dt = new Date(2026, 10, 9 + (d - 1));
+            dateKey = dt.getFullYear() + '-' +
+              ('0' + (dt.getMonth() + 1)).slice(-2) + '-' +
+              ('0' + dt.getDate()).slice(-2);
+            var w = samples[dateKey];
+            if (!w) w = { text: '晴', temperature: null, min: 0, max: 0 };
+            var ww = { text: w.text, min: w.min, max: w.max };
+            if (w.temperature !== null) ww.temperature = w.temperature;
+            all[String(d)] = { lunar: '农历十月', term: '', festivals: [],
+                               weather: ww, weatherEnabled: true, yi: '', ji: '' };
+          }
+          var f = all[String(\(panelDay))];
+          if (window.ttDayPanelSetState) {
+            window.ttDayPanelSetState({ dayPanel: {
+              day: \(panelDay), todos: [], events: [], festival: f, weatherEnabled: true
+            }, dayFestivals: all, dayFlags: {}, dayPanelOpen: true });
+          }
+          if (window.ttDayPanelOpen) window.ttDayPanelOpen(\(panelDay), false);
+          var el = document.querySelector('.dpwbox');
+          var st = window.ttDayPanelIsOpen ? window.ttDayPanelIsOpen() : null;
+          return JSON.stringify({ rows: document.querySelectorAll('.dpwbox').length,
+                                  text: el ? el.textContent : '',
+                                  openDay: st ? st.day : -1,
+                                  panelDataDay: (window.ttDayPanelDataFor ? window.ttDayPanelDataFor() : null) });
+        })();
+        """
+        renderer.evaluateForTest(inject) { r in print("注入天气数据：\(r ?? "nil")") }
+        for _ in 0..<40 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
     }
 
     // 截**网页**（走 takeSnapshot —— WKWebView 在 `cacheDisplay` 里画不出内容）。

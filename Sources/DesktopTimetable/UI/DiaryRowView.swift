@@ -9,6 +9,8 @@ final class DiaryRowView: NSView {
     private let entry: DiaryEntry
     private let selected: Bool
     var onSelect: (() -> Void)?
+    /// **双击**一行（2026-11-10 用户要求：双击直接打开这篇日记的编辑窗口）。
+    var onDoubleClick: (() -> Void)?
 
     init(entry: DiaryEntry, selected: Bool) {
         self.entry = entry
@@ -53,7 +55,16 @@ final class DiaryRowView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    /// 窗口没成为 key 时第一次点击也要算数（否则用户会觉得「要点两下」）。
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func mouseDown(with event: NSEvent) {
+        if event.clickCount >= 2 {
+            // 双击：先按「选中」处理（视觉上先选中），再打开编辑窗口。
+            onSelect?()
+            onDoubleClick?()
+            return
+        }
         onSelect?()
     }
 }

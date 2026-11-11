@@ -12,7 +12,7 @@ struct AppearanceConfig: Equatable {
     var maxOpacity: Double = 1.0
     /// 「课表设置」面板自身的不透明度：1 = 不透明，0.2 = 近乎全透明。
     /// 只影响设置窗口，不影响桌面上的课表卡片。
-    var panelOpacity: Double = 1.0
+    var panelOpacity: Double = 0.5
     /// 课表卡片的大小（等比缩放系数）：1.0 = 原始尺寸。
     /// 范围 0.70–1.15（滑块上限），实际还要按屏幕可见区夹一次。
     var cardScale: Double = 1.0
@@ -23,7 +23,7 @@ struct AppearanceConfig: Equatable {
         fadeOutSec = dict["fadeOutSec"] ?? 6.0
         minOpacity = dict["minOpacity"] ?? 0.22
         maxOpacity = dict["maxOpacity"] ?? 1.0
-        panelOpacity = dict["panelOpacity"] ?? 1.0
+        panelOpacity = dict["panelOpacity"] ?? 0.5
         // 老配置没有这一项 → 默认 1.0（原始尺寸），自动兼容。
         cardScale = dict["cardScale"] ?? 1.0
     }

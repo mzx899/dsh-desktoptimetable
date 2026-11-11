@@ -1,4 +1,5 @@
 import AppKit
+import CoreLocation
 import Foundation
 import UserNotifications
 
@@ -250,7 +251,7 @@ suite("ScheduleStore · 读写往返") {
     expectEqual(cfg.minOpacity, 0.3, "配置 minOpacity")
     expectEqual(cfg.panelOpacity, 0.55, "配置 panelOpacity（设置面板不透明度）")
     expectEqual(cfg.dictionary["panelOpacity"], 0.55, "面板不透明度写回字典")
-    expectEqual(AppearanceConfig([:]).panelOpacity, 1.0, "面板不透明度缺省为 1（不透明）")
+    expectEqual(AppearanceConfig([:]).panelOpacity, 0.5, "面板不透明度缺省为 0.5（滑块在正中）")
 
     // 缺字段时用默认值
     let empty = ScheduleStore(directory: tmp.appendingPathComponent("empty"))
@@ -4201,8 +4202,13 @@ suite("网页资源 · CSS / JS 体检") {
         // 网页侧：字段缺失 / null → 整行不渲染。
         expect(js?.contains("f.weather") == true,
                "网页层要读 festival.weather")
-        expect(js?.contains("dpweather") == true,
-               "天气行要有 .dpweather 样式")
+        // 2026-11-10：天气改成「一整块带边框」（`.dpwbox`），不再是单行 `.dpweather`。
+        expect(js?.contains("dpwbox") == true,
+               "天气块要有 .dpwbox 样式（带边框）")
+        expect(js?.contains("dpwnow") == true,
+               "当天要显示当前温度（.dpwnow）")
+        expect(js?.contains("dpwrange") == true,
+               "要有最低 / 最高那一行（.dpwrange）")
         expect(js?.contains("f.yi") == true && js?.contains("f.ji") == true,
                "网页层要读 festival.yi / festival.ji")
         expect(js?.contains("dpyiji") == true,
@@ -6748,17 +6754,32 @@ suite("建除黄历（简化的建除十二神）") {
 }
 
 suite("日期覆盖层 · 天气 / 宜忌的模型与 JSON") {
-    // 天气为 nil → JSON 里整个键是 null（网页隐藏整行）。
+    // 天气为 nil → JSON 里整个键是 null；网页据 weatherEnabled 决定
+    // 显示「暂无数据」还是整行不显示。
     var content = DayPanelContent()
     content.festival.lunar = "农历九月廿三"
+    content.weatherEnabled = true
     let json = content.jsonObject
     let fest = json["festival"] as? [String: Any]
     expect(fest != nil, "JSON 里有 festival")
-    expect(fest?["weather"] is NSNull, "没有天气时 weather 是 null（网页隐藏整行）")
+    expect(fest?["weather"] is NSNull, "没有天气时 weather 是 null（网页显示「暂无数据」）")
+    expectEqual(fest?["weatherEnabled"] as? Bool, true, "开关状态要推给网页")
+    // ⚠️ 2026-11-10：没选地区时网页要显示「请在设置里选择地区」，
+    // 所以 region 必须随 festival 一起推过去（空串 = 还没选）。
+    expectEqual(fest?["region"] as? String, "", "没选地区时 region 是空串")
+    var contentRegion = DayPanelContent()
+    contentRegion.weatherRegion = "秦皇岛"
+    let festRegion = contentRegion.jsonObject["festival"] as? [String: Any]
+    expectEqual(festRegion?["region"] as? String, "秦皇岛", "选了地区要把地区名推给网页")
     expectEqual(fest?["yi"] as? String, "", "没有宜忌时 yi 是空串（网页隐藏这一行）")
+
+    // 没开「显示天气」→ weatherEnabled 是 false（网页不显示天气行）。
+    let off = DayPanelContent().jsonObject["festival"] as? [String: Any]
+    expectEqual(off?["weatherEnabled"] as? Bool, false, "没开天气时 weatherEnabled=false")
 
     // 有天气 → JSON 里有完整的天气字段。
     var content2 = DayPanelContent()
+    content2.weatherEnabled = true
     content2.festival.weather = DayPanelWeather(text: "晴", temperature: 12, min: 12, max: 21)
     content2.festival.yi = "出行"
     content2.festival.ji = "动土"
@@ -6771,22 +6792,200 @@ suite("日期覆盖层 · 天气 / 宜忌的模型与 JSON") {
     expectEqual(fest2?["yi"] as? String, "出行", "有宜")
     expectEqual(fest2?["ji"] as? String, "动土", "有忌")
 
-    // 空天气的判定（描述和温度都没有 → 整行隐藏）。
+    // 空天气的判定（描述和温度都没有 → 没有可显示的内容）。
     expectEqual(DayPanelWeather().isEmpty, true, "空天气")
     expectEqual(DayPanelWeather(text: "晴").isEmpty, false, "有现象就不算空")
     expectEqual(DayPanelWeather(temperature: 3).isEmpty, false, "有温度就不算空")
 }
 
+suite("日期覆盖层 · 天气缓存按天分键（过 12 点一定更新）") {
+    func at(_ y: Int, _ m: Int, _ d: Int) -> Date {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
+        return cal.date(from: DateComponents(year: y, month: m, day: d, hour: 12))!
+    }
+    let shanghai = CLLocationCoordinate2D(latitude: 31.2304, longitude: 121.4737)
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
+    let k1 = OpenMeteoWeatherProvider.cacheKey(shanghai, on: at(2026, 11, 10), calendar: cal)
+    let k2 = OpenMeteoWeatherProvider.cacheKey(shanghai, on: at(2026, 11, 11), calendar: cal)
+    expect(k1 != k2, "跨天必须换缓存键（否则 00:05 还在用 23:55 的昨天天气）")
+    expect(k1.hasPrefix("2026-11-10|"), "缓存键要带本地日期（实际 \(k1)）")
+    // 同一天、同一位置 → 同一个键（30 分钟缓存照常生效）。
+    let same = OpenMeteoWeatherProvider.cacheKey(shanghai, on: at(2026, 11, 10), calendar: cal)
+    expectEqual(same, k1, "同一天同一位置键一致")
+}
+
+suite("日期覆盖层 · 跨天刷新天气（今天 / 天气都要换）") {
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
+    func day(_ y: Int, _ m: Int, _ d: Int) -> Date {
+        cal.date(from: DateComponents(year: y, month: m, day: d))!
+    }
+    let fake = FakeWeatherProvider(
+        stub: DayPanelWeather(text: "晴", temperature: 12, min: 12, max: 21))
+    // ⚠️ 预报必须**按天**给（2026-11）：控制器按每一列的真实日期去取。
+    // baseMonday = 2026-11-02（周一）→ 第 1 列 = 2026-11-02。
+    fake.forecast = [
+        "2026-11-02": DayPanelWeather(text: "晴", temperature: 12, min: 12, max: 21),
+        "2026-11-03": DayPanelWeather(text: "多云", temperature: 10, min: 8, max: 18),
+        "2026-11-04": DayPanelWeather(text: "多云", min: 8, max: 18),
+    ]
+    let controller = DayPanelController(
+        settings: DayPanelSettings(enabled: true, weatherEnabled: true),
+        festivalProvider: EmptyFestivalProvider(),
+        todayIndex: 1,
+        baseMonday: day(2026, 11, 2),
+        eventStore: FakeEventKitStore(),
+        weatherProvider: fake)
+    controller.open(day: 1)
+    for _ in 0..<10 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    expectEqual(controller.testContent.festival.weather?.text, "晴", "打开今天 → 有天气")
+    expectEqual(controller.testContent.weatherEnabled, true, "内容里带开关状态")
+    let before = fake.forecastRequestCount
+    expect(before >= 1, "应该请求过一次天气（实际 \(before) 次）")
+
+    // 模拟过了 12 点：周一 → 周二。
+    controller.handleDayChange(now: day(2026, 11, 3))
+    for _ in 0..<10 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    expectEqual(controller.testTodayIndex, 2, "跨天后「今天」要移到周二")
+    expect(fake.forecastRequestCount > before,
+           "跨天后要重新取天气（请求次数 \(before) → \(fake.forecastRequestCount)）")
+    expectEqual(controller.testContent.festival.weather?.text, "晴",
+                "新一天要重新拿到天气（而不是沿用旧的 nil）")
+
+    // ⚠️ **切到别的列再切回来，天气不能丢**（2026-11-10 用户反馈）。
+    //
+    // 根因：`refreshFestivalCache()` 每次开列都把 `festivalByDay` 整份重算，
+    // 而天气是异步贴进去的 → 被抹掉；面板必须先闪「暂无数据」再等一次回包。
+    // 现在天气按**日期**存在 `weatherByDate` 里，重算时贴回去。
+    controller.open(day: 3)   // 第 3 列 = 2026-11-04
+    for _ in 0..<6 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    expectEqual(controller.testContent.festival.weather?.text, "多云",
+                "第 3 列要用它自己那天的天气（2026-11-04 多云）")
+    controller.open(day: 1)   // 切回「今天」= 2026-11-02
+    for _ in 0..<10 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    expectEqual(controller.testContent.festival.weather?.text, "晴",
+                "切到第 3 列再切回「今天」→ 天气还要在（不能变 nil）")
+
+    // ⚠️ **回归：回包不能被「竞态防线」丢掉**（2026-11 修「授权给了、坐标拿到了，
+    // 天气还是没有」）。
+    //
+    // 以前 `loadWeather` 的回包判 `token == contentToken && currentDay == day` ——
+    // 指针扫过 3 列，contentToken 就变了，所有回包全被丢掉。
+    // 现在：天气是全局数据，回包到了就存进 `festivalByDay[day]`，
+    // 当前看着哪一列就显示哪一列。
+    let raceWeather = FakeWeatherProvider(
+        stub: DayPanelWeather(text: "晴", temperature: 4, min: -6, max: 4))
+    raceWeather.forecast = [
+        "2026-11-02": DayPanelWeather(text: "晴", temperature: 4, min: -6, max: 4),
+        "2026-11-06": DayPanelWeather(text: "晴", temperature: 4, min: -6, max: 4),
+    ]
+    let raceController = DayPanelController(
+        settings: DayPanelSettings(enabled: true, weatherEnabled: true),
+        festivalProvider: EmptyFestivalProvider(),
+        todayIndex: 1,
+        baseMonday: day(2026, 11, 2),
+        eventStore: FakeEventKitStore(),
+        weatherProvider: raceWeather)
+    raceController.open(day: 1)
+    // 模拟「用户马上又点了别的列」—— contentToken / currentDay 全变。
+    raceController.open(day: 5)
+    for _ in 0..<10 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    // 天气必须真的到 7 天详情里（不管当前看的是哪一列）。
+    let raceFestivals = raceController.currentFestivalsJSON()
+    let raceAny = raceFestivals.values.compactMap { $0 as? [String: Any] }
+    let raceHasWeather = raceAny.contains { fest in
+        if let w = fest["weather"] as? [String: Any] { return w["text"] != nil }
+        return false
+    }
+    expect(raceHasWeather, "换列之后天气也必须留下来（不能被竞态防线丢掉）")
+    expect(raceWeather.forecastRequestCount <= 2,
+           "扫多列不能发多次请求（实际 \(raceWeather.forecastRequestCount) 次）")
+
+    // 设置里关掉「显示天气」→ 面板里立刻没有天气，且不再请求。
+    controller.updateSettings(DayPanelSettings(enabled: true, weatherEnabled: false))
+    expectEqual(controller.testContent.weatherEnabled, false, "关掉开关要立刻同步到内容")
+    expect(controller.testContent.festival.weather == nil, "关掉开关要清掉已显示的天气")
+    let afterOff = fake.forecastRequestCount
+    controller.updateSettings(DayPanelSettings(enabled: true, weatherEnabled: true))
+    for _ in 0..<10 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    expectEqual(controller.testContent.weatherEnabled, true, "重新打开开关要同步到内容")
+    expect(fake.forecastRequestCount > afterOff,
+           "重新打开开关要重新请求天气（\(afterOff) → \(fake.forecastRequestCount)）")
+}
+
 suite("日期覆盖层 · 天气的解析与编码") {
-    // Open-Meteo 的响应解析。
+    // ⚠️ 日期必须**跟着今天走**：以前写死 2026-11-10，跨过午夜后
+    // `todayKey()` 变成第二天，整组断言就全红（2026-11-11 踩到）。
+    let day0 = OpenMeteoWeatherProvider.todayKey()
+    let day1 = OpenMeteoWeatherProvider.todayKey(on: Date().addingTimeInterval(86400))
+
+    // Open-Meteo 的响应解析（**按天**）。
     let ok = OpenMeteoWeatherProvider.parse([
         "current": ["temperature_2m": 12.4, "weather_code": 0] as [String: Any],
-        "daily": ["temperature_2m_max": [21.0], "temperature_2m_min": [12.0]] as [String: Any]
+        "daily": [
+            "time": [day0, day1],
+            "weather_code": [0, 61],
+            "temperature_2m_max": [21.0, 18.0],
+            "temperature_2m_min": [12.0, 9.0]
+        ] as [String: Any]
     ])
     expectEqual(ok?.text, "晴", "天气码 0 → 晴")
     expectEqual(ok?.temperature, 12.4, "当前温度")
     expectEqual(ok?.max, 21.0, "最高温")
     expectEqual(ok?.min, 12.0, "最低温")
+
+    // ⚠️ **按天对齐**（2026-11 修「温度不对 / 天气串天」）：
+    // 每一列要拿**自己那天**的预报，不能都拿第 0 个。
+    let forecast = OpenMeteoWeatherProvider.parseForecast([
+        "current": ["temperature_2m": 12.4, "weather_code": 0] as [String: Any],
+        "daily": [
+            "time": [day0, day1],
+            "weather_code": [0, 61],
+            "temperature_2m_max": [21.0, 18.0],
+            "temperature_2m_min": [12.0, 9.0]
+        ] as [String: Any]
+    ])
+    expectEqual(forecast.count, 2, "预报要按天分开（实际 \(forecast.count) 天）")
+    expectEqual(forecast[day1]?.text, "小雨", "第二天的天气要按日期取")
+    expectEqual(forecast[day1]?.max, 18.0, "第二天的最高温")
+    expectEqual(forecast[day1]?.min, 9.0, "第二天的最低温")
+    expectEqual(forecast[day0]?.temperature, 12.4, "今天那天的当前温度")
+
+    // ⚠️ **多模型取中位数**（2026-11-10 修「高低温比苹果天气低 5°」）。
+    //
+    // 实测秦皇岛 2026-11-10：`best_match` 报 -5~6，中国天气网 / 苹果天气都是 -1~11。
+    // 现在请求里带 ecmwf/gfs/ukmo 三个模型，日最低 / 最高取它们的中位数。
+    expectEqual(OpenMeteoWeatherProvider.median([-3.1, -1.4, -2.1]), -2.1, "奇数个取中间值")
+    expectEqual(OpenMeteoWeatherProvider.median([1.0, 5.0]), 3.0, "偶数个取中间两个的平均")
+    expect(OpenMeteoWeatherProvider.median([]) == nil, "空数组 → nil（不编 0）")
+
+    // 实测北京那天：GFS 的最低温 5.6° 明显跑飞（实际 0°）。
+    // 中位数应取 0.8（ECMWF 0.2 / UKMO 0.8 / GFS 5.6），不能被 5.6 带偏。
+    let ensemble = OpenMeteoWeatherProvider.parseForecast([
+        "current": ["temperature_2m": 7.2, "weather_code": 0] as [String: Any],
+        "daily": [
+            "time": ["2026-11-10"],
+            "weather_code_best_match": [0],
+            "temperature_2m_max_best_match": [12.0],
+            "temperature_2m_min_best_match": [0.2],
+            "temperature_2m_max_ecmwf_ifs025": [11.5],
+            "temperature_2m_min_ecmwf_ifs025": [0.2],
+            "temperature_2m_max_gfs_seamless": [13.4],
+            "temperature_2m_min_gfs_seamless": [5.6],
+            "temperature_2m_max_ukmo_seamless": [11.0],
+            "temperature_2m_min_ukmo_seamless": [0.8]
+        ] as [String: Any]
+    ])
+    expectEqual(ensemble["2026-11-10"]?.min, 0.8,
+                "最低温取三模型中位数（挡掉 GFS 跑飞的 5.6）")
+    expectEqual(ensemble["2026-11-10"]?.max, 11.5, "最高温取三模型中位数")
+    expectEqual(ensemble["2026-11-10"]?.text, "晴", "现象仍取 best_match")
+    // 请求里没带 models（老响应 / 自检假数据）→ 必须退回不带后缀的数组。
+    expectEqual(OpenMeteoWeatherProvider.dailyValue(
+        ["temperature_2m_min": [3.0, 4.0]], field: "temperature_2m_min",
+        at: 1, fallback: [3.0, 4.0]), 4.0, "没有多模型时退回普通数组")
 
     // ⚠️ **什么都没有 → nil**（网页隐藏整行，绝不显示 0°）。
     expect(OpenMeteoWeatherProvider.parse([:]) == nil, "空响应 → nil（不显示假数据）")
@@ -6827,23 +7026,248 @@ suite("日期覆盖层 · 设置往返（天气开关）") {
     expectEqual(strict.weatherEnabled, false, "weatherEnabled: 1（数字）不算开启")
 }
 
+suite("网页资源 · 面板文字不可框选") {
+    // 2026-11-11 用户两次反馈「日历这一列文字能框选」。
+    // 第一次只改了 .dpscroll，漏了 .dpbody.narrow.scroll（那才是面板正文容器）。
+    let cssURL = URL(fileURLWithPath: "Resources/Timetable.css")
+    if let css = try? String(contentsOf: cssURL, encoding: .utf8) {
+        // 找出 .dpbody.narrow.scroll 那一段，确认它没有把 user-select 打开。
+        if let range = css.range(of: ".dpbody.narrow.scroll") {
+            // 只取**这一条规则**（到第一个 `}` 为止），别把后面的规则也算进来。
+            let rest = css[range.lowerBound...]
+            let block = rest.prefix(while: { $0 != "}" })
+            // 注意：注释里也写着这几个字，所以只匹配**声明**（带分号）。
+            expect(!block.contains("user-select: text;"),
+                   "面板正文（.dpbody.narrow.scroll）不能打开文本选择（实际：\(block.prefix(120)))")
+            expect(block.contains("user-select: none"), "面板正文要显式 none")
+        } else {
+            expect(false, "找不到 .dpbody.narrow.scroll 规则")
+        }
+        // 输入框仍然要能选中。
+        expect(css.contains("input.dptimepart") && css.contains("user-select: text"),
+               "输入框仍要保留 user-select: text（不然没法选中输入内容）")
+    } else {
+        expect(false, "读不到 Timetable.css")
+    }
+}
+
+suite("日记 · 日期可改（编辑时能挪到别的天）") {
+    // 日期归一化：各种写法都收敛成 yyyy-MM-dd；非法就退回原日期。
+    expectEqual(DiaryEditorDialog.normalizeDate("2026-11-11", fallback: "2026-01-01"),
+                "2026-11-11", "标准写法")
+    expectEqual(DiaryEditorDialog.normalizeDate("2026/12/05", fallback: "2026-01-01"),
+                "2026-12-05", "斜杠写法")
+    expectEqual(DiaryEditorDialog.normalizeDate("20261111", fallback: "2026-01-01"),
+                "2026-11-11", "纯数字写法")
+    expectEqual(DiaryEditorDialog.normalizeDate("2026-13-40", fallback: "2026-03-03"),
+                "2026-03-03", "月 / 日越界 → 退回原日期（不写坏日期）")
+    expectEqual(DiaryEditorDialog.normalizeDate("", fallback: "2026-03-03"),
+                "2026-03-03", "空 → 原日期")
+
+    // 落盘：改日期后，这一天能查到、原来那天查不到。
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("diary-date-\(UUID().uuidString)")
+    let store = DiaryStore(directory: dir)
+    let e = try! store.add(date: "2026-11-10", title: "原", body: "b", time: "20:00")
+    _ = try! store.update(id: e.id, title: "原", body: "b", time: "20:00",
+                          date: "2026-11-12")
+    expect(store.entries(on: "2026-11-10").isEmpty, "挪走之后原来那天不再有这篇")
+    expectEqual(store.entries(on: "2026-11-12").count, 1, "新日期下能查到")
+    expectEqual(store.entries(on: "2026-11-12").first?.title, "原", "内容没变")
+}
+
+suite("滑杆 · 中点映射（面板不透明度 50% 在正中）") {
+    // 2026-11-10 用户要求：最小 20% 不变、50% 时滑块在**正中间**、最大 100%。
+    expectEqual(SliderRow.value(fromPosition: 0.0, lo: 0.2, hi: 1.0, midpoint: 0.5), 0.2,
+                "最左 = 20%")
+    expectEqual(SliderRow.value(fromPosition: 0.5, lo: 0.2, hi: 1.0, midpoint: 0.5), 0.5,
+                "正中 = 50%")
+    expectEqual(SliderRow.value(fromPosition: 1.0, lo: 0.2, hi: 1.0, midpoint: 0.5), 1.0,
+                "最右 = 100%")
+    // 反解：50% → 位置 0.5；20% → 0；100% → 1。
+    expectEqual(SliderRow.position(fromValue: 0.5, lo: 0.2, hi: 1.0, midpoint: 0.5), 0.5,
+                "50% 的值要落在位置 0.5")
+    expectEqual(SliderRow.position(fromValue: 0.2, lo: 0.2, hi: 1.0, midpoint: 0.5), 0.0,
+                "20% 的值要落在最左")
+    expectEqual(SliderRow.position(fromValue: 1.0, lo: 0.2, hi: 1.0, midpoint: 0.5), 1.0,
+                "100% 的值要落在最右")
+    // 没有中点映射时保持线性（课表大小滑杆走这条）。
+    expectEqual(SliderRow.value(fromPosition: 0.3, lo: 0.7, hi: 1.15, midpoint: nil), 0.3,
+                "没有 midpoint 时位置即值")
+}
+
+suite("窗口层级策略 · 只在本 App 前台时压住别人") {
+    // 2026-11-10 用户反馈：设置开着的时候去用别的软件，设置仍浮在人家上面。
+    let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 120),
+                     styleMask: [.titled], backing: .buffered, defer: false)
+    w.isReleasedWhenClosed = false
+    WindowLevelPolicy.register(w)
+    expectEqual(w.level, .floating, "注册时（本 App 前台）应该是 .floating")
+
+    WindowLevelPolicy.setRaised(false)
+    expectEqual(w.level, .normal, "切到别的 App 之后要降到 .normal（不再压着别人）")
+
+    WindowLevelPolicy.setRaised(true)
+    expectEqual(w.level, .floating, "回到本 App 再抬起来")
+    w.orderOut(nil)
+}
+
+suite("天气地名搜索 · 优先中国 / 换地区清旧数据") {
+    // ⚠️ 2026-11-10 实测：搜「宜昌」第一条是**台湾**的宜昌（23.97, 121.58），
+    // 面板于是显示 20° / 雾，而湖北宜昌是 9~16°。现在优先取中国的。
+    let results: [[String: Any]] = [
+        ["name": "宜昌", "latitude": 23.97417, "longitude": 121.58056,
+         "country": "台湾", "country_code": "TW", "population": 50000],
+        ["name": "宜昌市", "latitude": 30.71444, "longitude": 111.28472,
+         "country": "中国", "country_code": "CN", "population": 4000000],
+    ]
+    let picked = OpenMeteoWeatherProvider.pickChineseResult(results)
+    expectEqual(picked?.latitude, 30.71444, "要选中国的宜昌（湖北），不能选台湾那条")
+    expectEqual(picked?.longitude, 111.28472, "经度也要是湖北的")
+
+    // 全是中国的结果 → 人口多的优先。
+    let twoChinese: [[String: Any]] = [
+        ["name": "襄阳", "latitude": 31.15401, "longitude": 119.62278,
+         "country": "中国", "country_code": "CN", "population": 300000],
+        ["name": "襄阳", "latitude": 32.0422, "longitude": 112.14479,
+         "country": "中国", "country_code": "CN", "population": 3000000],
+    ]
+    expectEqual(OpenMeteoWeatherProvider.pickChineseResult(twoChinese)?.longitude, 112.14479,
+                "两条都是中国 → 人口多的优先")
+
+    // 一条中国结果都没有 → nil（调用方会退回「名字 + 市」再查一次）。
+    expect(OpenMeteoWeatherProvider.pickChineseResult([
+        ["name": "Nowhere", "latitude": 1.0, "longitude": 2.0,
+         "country": "美国", "country_code": "US"]
+    ]) == nil, "没有中国结果 → nil")
+
+    // ⚠️ **内置坐标兜底**（2026-11-10 自查）：这几个城市在地名库里搜不到，
+    // 选了会永远「暂无数据」；港澳台会被「只认中国」筛掉。
+    for city in ["运城", "连云港", "宿迁", "湖州", "许昌", "商丘", "益阳", "石嘴山",
+                 "香港", "澳门", "台北"] {
+        expect(WeatherCityCatalog.coordinate(for: city) != nil, "\(city) 要有内置坐标")
+    }
+    expect(WeatherCityCatalog.coordinate(for: "北京") == nil,
+           "北京不在内置表里（走地名服务就行）")
+    // 港澳台的 country_code 也要认（HK / MO / TW）。
+    let hk = OpenMeteoWeatherProvider.pickChineseResult([
+        ["name": "香港", "latitude": 22.3193, "longitude": 114.1694,
+         "country": "香港", "country_code": "HK"],
+    ])
+    expect(hk != nil, "香港（country_code = HK）要认，不能被当成国外")
+
+    // 换地区 → 旧地区的天气要清掉并重取。
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
+    func day(_ y: Int, _ m: Int, _ d: Int) -> Date {
+        cal.date(from: DateComponents(year: y, month: m, day: d))!
+    }
+    let fake = FakeWeatherProvider(stub: DayPanelWeather(text: "晴", temperature: 2, min: -2, max: 10))
+    fake.forecast = ["2026-11-02": DayPanelWeather(text: "晴", temperature: 2, min: -2, max: 10)]
+    var settings = DayPanelSettings(enabled: true, weatherEnabled: true, weatherCity: "秦皇岛")
+    let ctl = DayPanelController(settings: settings,
+                                 festivalProvider: EmptyFestivalProvider(),
+                                 todayIndex: 1,
+                                 baseMonday: day(2026, 11, 2),
+                                 eventStore: FakeEventKitStore(),
+                                 weatherProvider: fake)
+    ctl.open(day: 1)
+    for _ in 0..<10 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    expectEqual(ctl.testContent.festival.weather?.text, "晴", "先有天气")
+    let before = fake.forecastRequestCount
+
+    settings.weatherCity = "宜昌"
+    ctl.updateSettings(settings)
+    for _ in 0..<10 { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    expect(fake.forecastRequestCount > before,
+           "换地区要重新取天气（\(before) → \(fake.forecastRequestCount)）")
+    expectEqual(ctl.testContent.festival.weather?.text, "晴", "重新取回来还是天气")
+}
+
+suite("天气地区目录 · 热门 + 拼音首字母 + 搜索") {
+    // 打开时的顺序：热门城市在最前，其余按首字母 A–Z。
+    let sections = WeatherCityCatalog.sections(matching: "")
+    expectEqual(sections.first?.title, "热门城市", "第一段必须是「热门城市」")
+    expect(!(sections.first?.cities.isEmpty ?? true), "热门城市不能是空的")
+    let letters = sections.dropFirst().map(\.title)
+    expectEqual(letters, letters.sorted(), "热门城市之后的字母段必须按 A–Z 排序（实际 \(letters)）")
+    // 每个字母段里都要有城市，且顺序稳定。
+    for s in sections.dropFirst() {
+        expect(!s.cities.isEmpty, "字母段「\(s.title)」不能空")
+    }
+    // 热门城市和字母段不能重复列同一个城市。
+    let flat = sections.flatMap(\.cities)
+    expectEqual(Set(flat).count, flat.count, "同一个城市不能出现两次")
+
+    // 拼音首字母是**现算**的（不写死表）。
+    expectEqual(WeatherCityCatalog.initial(of: "北京"), "B", "北京 → B")
+    expectEqual(WeatherCityCatalog.initial(of: "秦皇岛"), "Q", "秦皇岛 → Q")
+    expectEqual(WeatherCityCatalog.initial(of: "乌鲁木齐"), "W", "乌鲁木齐 → W")
+
+    // 搜索：中文名 / 拼音都能命中。
+    let byName = WeatherCityCatalog.sections(matching: "秦皇").flatMap(\.cities)
+    expect(byName.contains("秦皇岛"), "中文搜索要能命中秦皇岛（实际 \(byName)）")
+    let byPinyin = WeatherCityCatalog.sections(matching: "qinhuang").flatMap(\.cities)
+    expect(byPinyin.contains("秦皇岛"), "拼音搜索要能命中秦皇岛（实际 \(byPinyin)）")
+    expectEqual(WeatherCityCatalog.matchCount(matching: "zzzz"), 0, "查不到时是 0 个")
+
+    // 搜索命中后不再插「热门城市」那一段（否则会多出无关城市）。
+    let searched = WeatherCityCatalog.sections(matching: "qinhuang")
+    expect(!searched.contains(where: { $0.title == "热门城市" }),
+           "搜索时不该再插「热门城市」段")
+
+    // 选择器窗口能建出来（不弹）。
+    let win = CityPickerDialog.buildWindowForTest(current: "秦皇岛")
+    expect(win.contentView != nil, "选择器要有内容")
+    expect(win.title == "选择地区", "标题是「选择地区」（实际 \(win.title)）")
+
+    // ⚠️ **城市行：单击选中（高亮）、双击才确认**（2026-11-10 用户澄清：
+    // 「双击才能确认那个城市，单击只是选择（那一条变白）」）。
+    let single = CityPickerDialog.simulateClickForTest(city: "北京", doubleClick: false)
+    expectEqual(single.highlighted, "北京", "单击 → 这一条高亮")
+    expect(single.confirmed == nil, "单击**不能**确认（窗口要留着）")
+
+    let double = CityPickerDialog.simulateClickForTest(city: "北京", doubleClick: true)
+    expectEqual(double.confirmed, "北京", "双击 → 确认这个地区")
+
+    // 命中：城市名那一块也要算在这一行上（子视图不能吃点击）。
+    let win2 = CityPickerDialog.buildWindowForTest(current: "秦皇岛")
+    if let content = win2.contentView,
+       let row = CityPickerDialog.findRowForTest(in: content, city: "北京") {
+        content.layoutSubtreeIfNeeded()
+        let center = row.convert(NSPoint(x: row.bounds.midX, y: row.bounds.midY),
+                                 to: row.superview)
+        expect(row.hitTest(center) === row, "点城市行中心要命中这一行")
+        let left = row.convert(NSPoint(x: 6, y: row.bounds.midY), to: row.superview)
+        expect(row.hitTest(left) === row, "点城市名也要命中这一行")
+    } else {
+        expect(false, "选择器里找不到「北京」那一行")
+    }
+}
+
 suite("日期覆盖层 · 天气行的状态文案") {
-    // 关着 → 不显示任何授权提示。
+    // 关着 → 只说「关闭时不显示天气」，不给任何引导。
     let off = DayPanelWeatherRow.describe(enabled: false, authStatus: .authorizedAlways)
     expect(!off.needsButton, "关着时不该显示「去授权」")
+    expect(off.text.contains("关闭"), "关着时文案要说清是关着的")
 
-    // 已授权 → 不显示按钮。
-    let granted = DayPanelWeatherRow.describe(enabled: true, authStatus: .authorizedAlways)
-    expect(!granted.needsButton, "已授权时不该显示「去授权」")
-    expect(granted.text.contains("位置"), "已授权的文案要说清楚是按位置")
+    // 开了 + 填了地区 → 按这个地区显示，不需要定位权限。
+    let withRegion = DayPanelWeatherRow.describe(enabled: true, authStatus: .denied,
+                                                  city: "秦皇岛")
+    expect(!withRegion.needsButton, "填了地区就不用「去授权」")
+    expect(withRegion.text.contains("秦皇岛"), "文案里要有地区名")
+    expect(withRegion.text.contains("不需要定位权限"), "要说明不依赖定位")
 
-    // 没授权 / 没问过 → 显示按钮。
-    expect(DayPanelWeatherRow.describe(enabled: true, authStatus: .denied).needsButton,
-           "被拒绝时要显示「去授权」")
-    expect(DayPanelWeatherRow.describe(enabled: true, authStatus: .notDetermined).needsButton,
-           "还没问过时要显示「去授权」")
-    expect(!DayPanelWeatherRow.describe(enabled: true, authStatus: nil).needsButton,
-           "状态未知时不显示按钮（不预判）")
+    // ⚠️ 开了但没选地区（2026-11-10）：
+    // 面板会提示「请在设置里选择地区」—— 设置里也要这么写，两边口径一致。
+    // 不再引导「去授权」：ad-hoc 签名的 app 系统静默拒绝定位（用户实测）。
+    let noRegion = DayPanelWeatherRow.describe(enabled: true, authStatus: .authorizedAlways)
+    expect(!noRegion.needsButton, "没选地区时不该再出「去授权」（定位在 ad-hoc 签名下拿不到）")
+    expect(noRegion.text.contains("地区"), "没选地区时文案要提到地区")
+    expect(noRegion.text.contains("请在设置里选择地区"),
+           "文案和面板提示保持同一句「请在设置里选择地区」")
+    let noRegion2 = DayPanelWeatherRow.describe(enabled: true, authStatus: nil)
+    expect(noRegion2.text == noRegion.text, "授权状态不影响这句提示")
 }
 
 suite("已完成提醒事项 · 查询 / 排序 / 分页") {
