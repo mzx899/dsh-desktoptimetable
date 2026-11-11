@@ -39,6 +39,21 @@ CHANGELOG / 文档，等下一次大版本跃迁时一起推。
 - 验证：`git clone -b code` 到 `/tmp` → `make app` 通过、`make test` **2052 项断言全过**
   （证明仓库里这份源码完整、可编译）。
 
+## 第二次推送记录（2026-11-11）
+
+- 触发：用户明确要求「推送到仓库」（这次是 1.5.3 之后的累积推送，不是版本跃迁）。
+- 推送内容：`af8c28a..eadba21  code -> code`（快进，没有 force），**50 个文件**，
+  覆盖 1.5.4 ~ 1.5.9 + `[未发布]` 里的全部改动
+  （天气卡 / 日记改日期 / 面板文字不可框选 / 面板不透明度 50% 居中 /
+  弹窗锚点 / 窗口层级 / 设置面板首次打开位置修复 …）。
+- 结果：`code` = `eadba21`（218 个文件），`main` 仍停在 `c9e48e1 Initial commit`，**没动**。
+- 推送前后自检：
+  - `git status` 里没有 `build/`、`版本迭代/`、`.frames_analysis/`、`.DS_Store`、`*.bak`；
+  - `推送仓库/` 这份副本自己 `make app` 通过、`make test` **2220 项断言全过**；
+  - `git clone -b code` 到 `/tmp/dt-check` → `make app` 通过、
+    `make test` **2220 项断言全过**，本轮新自检 `--verify-settings-first-open` 也 ✅；
+  - `.git` 体积 11M（`git ls-files | wc -l` = 168 → 推送后 218）。
+
 ## 推送步骤（用户同意后）
 
 ```bash
